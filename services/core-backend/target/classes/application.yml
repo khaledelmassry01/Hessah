@@ -38,6 +38,16 @@ app:
     require-auth: ${APP_SECURITY_REQUIRE_AUTH:true}
     allowed-origin-patterns: ${APP_SECURITY_ALLOWED_ORIGIN_PATTERNS:http://localhost:3000,http://localhost:5173,http://localhost:8080}
     token-blacklist-cleanup-cron: ${APP_SECURITY_TOKEN_BLACKLIST_CLEANUP_CRON:0 0 3 * * *}
+    cookies:
+      secure: ${APP_SECURITY_COOKIES_SECURE:true}
+      access-cookie-name: ${APP_SECURITY_ACCESS_COOKIE_NAME:egx_access_token}
+      refresh-cookie-name: ${APP_SECURITY_REFRESH_COOKIE_NAME:egx_refresh_token}
+    rate-limit:
+      login-capacity: ${APP_SECURITY_RATE_LIMIT_LOGIN_CAPACITY:12}
+      register-capacity: ${APP_SECURITY_RATE_LIMIT_REGISTER_CAPACITY:6}
+      refill-minutes: ${APP_SECURITY_RATE_LIMIT_REFILL_MINUTES:1}
+    encryption:
+      key: ${APP_SECURITY_ENCRYPTION_KEY:EGXPortfolioEncryptionKey_ChangeMe_2026_32B!}
     jwt:
       secret: ${JWT_SECRET:EGXPortfolioOptimizerJwtSecretKey_ReplaceForProd_2026}
       access-token-minutes: ${APP_SECURITY_JWT_ACCESS_TOKEN_MINUTES:15}

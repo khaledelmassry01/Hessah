@@ -13,8 +13,8 @@ CREATE TABLE users (
     public_uuid CHAR(36) NOT NULL,
     email VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
-    full_name VARCHAR(255) NOT NULL,
-    phone VARCHAR(40),
+    full_name VARCHAR(1024) NOT NULL,
+    phone VARCHAR(255),
     kyc_status ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     account_status ENUM('ACTIVE', 'SUSPENDED', 'CLOSED') NOT NULL DEFAULT 'ACTIVE',
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -82,6 +82,7 @@ CREATE TABLE stock_instruments (
     isin VARCHAR(32),
     name VARCHAR(255) NOT NULL,
     sector_code VARCHAR(64) NOT NULL,
+    last_price DECIMAL(19, 4) NULL DEFAULT 0.0000,
     is_suspended BOOLEAN NOT NULL DEFAULT FALSE,
     suspension_reason VARCHAR(255),
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -553,7 +554,10 @@ CREATE INDEX ix_model_performance_params
 -- -----------------------------------------------------------------------------
 
 ALTER TABLE stock_instruments
-    ADD COLUMN IF NOT EXISTS last_price DECIMAL(19, 4) NULL AFTER sector_code;
+    ADD COLUMN IF NOT EXISTS last_price DECIMAL(19, 4) NULL DEFAULT 0.0000 AFTER sector_code;
+
+ALTER TABLE stock_instruments
+    MODIFY COLUMN last_price DECIMAL(19, 4) NULL DEFAULT 0.0000;
 
 UPDATE stock_instruments si
 JOIN (
@@ -566,3 +570,7 @@ JOIN (
     ) latest ON latest.stock_id = m.stock_id AND latest.latest_trade_date = m.trade_date
 ) lp ON lp.stock_id = si.id
 SET si.last_price = lp.close_price;
+
+UPDATE stock_instruments
+SET last_price = 0.0000
+WHERE last_price IS NULL;
