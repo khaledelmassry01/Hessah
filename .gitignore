@@ -1,0 +1,4 @@
+ai.log
+backend.log
+infra/.env
+infra/docker-compose.yml

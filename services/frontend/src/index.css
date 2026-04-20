@@ -1,0 +1,66 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@400;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 46 48% 97%;
+    --foreground: 210 35% 14%;
+    --card: 0 0% 100%;
+    --card-foreground: 210 35% 14%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 210 35% 14%;
+    --primary: 170 84% 30%;
+    --primary-foreground: 40 28% 96%;
+    --secondary: 40 32% 90%;
+    --secondary-foreground: 210 35% 18%;
+    --muted: 44 28% 90%;
+    --muted-foreground: 210 16% 40%;
+    --accent: 29 87% 52%;
+    --accent-foreground: 35 100% 12%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 42 42% 98%;
+    --border: 204 24% 86%;
+    --input: 204 24% 86%;
+    --ring: 170 84% 35%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 211 41% 10%;
+    --foreground: 42 22% 92%;
+    --card: 211 39% 13%;
+    --card-foreground: 42 22% 92%;
+    --popover: 211 39% 13%;
+    --popover-foreground: 42 22% 92%;
+    --primary: 168 74% 44%;
+    --primary-foreground: 210 38% 10%;
+    --secondary: 211 28% 22%;
+    --secondary-foreground: 42 22% 92%;
+    --muted: 210 26% 20%;
+    --muted-foreground: 210 16% 70%;
+    --accent: 34 95% 56%;
+    --accent-foreground: 25 100% 10%;
+    --destructive: 0 70% 49%;
+    --destructive-foreground: 42 42% 98%;
+    --border: 214 22% 26%;
+    --input: 214 22% 26%;
+    --ring: 168 74% 48%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: Manrope, Sora, "Segoe UI", sans-serif;
+    min-height: 100vh;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+}

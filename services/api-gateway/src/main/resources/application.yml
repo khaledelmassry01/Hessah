@@ -1,0 +1,31 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      routes:
+        - id: core-backend
+          uri: ${CORE_BACKEND_URL:http://core-backend:8081}
+          predicates:
+            - Path=/api/core/**
+          filters:
+            - StripPrefix=2
+        - id: ai-engine
+          uri: ${AI_ENGINE_URL:http://ai-engine:8000}
+          predicates:
+            - Path=/api/ai/**
+          filters:
+            - StripPrefix=2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true

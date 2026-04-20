@@ -1,0 +1,13 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2; python_version < "3.14"
+pydantic>=2.12.0,<3.0.0; python_version >= "3.14"
+# Keep legacy constraints for <=3.12 and use newer wheel-friendly versions on >=3.13.
+numpy<2.0.0; python_version < "3.13"
+numpy>=2.2.0,<3.0.0; python_version >= "3.13"
+pandas<2.2.0; python_version < "3.13"
+pandas>=2.2.3,<3.0.0; python_version >= "3.13"
+scipy==1.14.1; python_version < "3.13"
+scipy>=1.15.0,<2.0.0; python_version >= "3.13"
+yfinance==0.2.54
+git+https://github.com/egxlytics/egxpy.git

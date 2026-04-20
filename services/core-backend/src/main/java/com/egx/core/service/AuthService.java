@@ -1,0 +1,320 @@
+package com.egx.core.service;
+
+import com.egx.core.domain.Subscription;
+import com.egx.core.domain.TokenBlacklist;
+import com.egx.core.domain.User;
+import com.egx.core.domain.UserSession;
+import com.egx.core.domain.Wallet;
+import com.egx.core.domain.enums.AccountStatus;
+import com.egx.core.domain.enums.KycStatus;
+import com.egx.core.domain.enums.SubscriptionStatus;
+import com.egx.core.domain.enums.SubscriptionTier;
+import com.egx.core.repository.SubscriptionRepository;
+import com.egx.core.repository.TokenBlacklistRepository;
+import com.egx.core.repository.UserRepository;
+import com.egx.core.repository.UserSessionRepository;
+import com.egx.core.repository.WalletRepository;
+import com.egx.core.security.JwtService;
+import jakarta.transaction.Transactional;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.Locale;
+import java.util.UUID;
+
+@Service
+public class AuthService {
+
+    private final UserRepository userRepository;
+    private final SubscriptionRepository subscriptionRepository;
+    private final WalletRepository walletRepository;
+    private final TokenBlacklistRepository tokenBlacklistRepository;
+    private final UserSessionRepository userSessionRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final JwtService jwtService;
+
+    public AuthService(
+            UserRepository userRepository,
+            SubscriptionRepository subscriptionRepository,
+            WalletRepository walletRepository,
+            TokenBlacklistRepository tokenBlacklistRepository,
+            UserSessionRepository userSessionRepository,
+            PasswordEncoder passwordEncoder,
+            JwtService jwtService
+    ) {
+        this.userRepository = userRepository;
+        this.subscriptionRepository = subscriptionRepository;
+        this.walletRepository = walletRepository;
+        this.tokenBlacklistRepository = tokenBlacklistRepository;
+        this.userSessionRepository = userSessionRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.jwtService = jwtService;
+    }
+
+    @Transactional
+    public RegisteredUser register(RegisterCommand command) {
+        String normalizedEmail = normalizeEmail(command.email());
+        userRepository.findByEmail(normalizedEmail).ifPresent(existing -> {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Email is already registered");
+        });
+
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+
+        User user = new User();
+        user.setPublicUuid(UUID.randomUUID().toString());
+        user.setEmail(normalizedEmail);
+        user.setPasswordHash(passwordEncoder.encode(command.password()));
+        user.setFullName(command.fullName().trim());
+        user.setPhone(normalizePhone(command.phone()));
+        user.setKycStatus(KycStatus.PENDING);
+        user.setAccountStatus(AccountStatus.ACTIVE);
+        user.setCreatedAt(now);
+        user.setUpdatedAt(now);
+
+        User savedUser = userRepository.save(user);
+
+        Subscription subscription = new Subscription();
+        subscription.setUserId(savedUser.getId());
+        subscription.setTier(SubscriptionTier.FREE);
+        subscription.setStatus(SubscriptionStatus.ACTIVE);
+        subscription.setStartedAt(now);
+        subscription.setCreatedAt(now);
+        subscription.setUpdatedAt(now);
+        subscriptionRepository.save(subscription);
+
+        Wallet wallet = new Wallet();
+        wallet.setUserId(savedUser.getId());
+        wallet.setCurrency("EGP");
+        wallet.setAvailableBalance(BigDecimal.ZERO.setScale(4));
+        wallet.setLockedBalance(BigDecimal.ZERO.setScale(4));
+        wallet.setVersion(0L);
+        wallet.setCreatedAt(now);
+        wallet.setUpdatedAt(now);
+        walletRepository.save(wallet);
+
+        return new RegisteredUser(
+                savedUser.getId(),
+                savedUser.getEmail(),
+                savedUser.getFullName(),
+                SubscriptionTier.FREE
+        );
+    }
+
+    @Transactional
+    public AuthTokens login(LoginCommand command) {
+        String normalizedEmail = normalizeEmail(command.email());
+        User user = userRepository.findByEmail(normalizedEmail)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid email or password"));
+
+        if (!passwordEncoder.matches(command.password(), user.getPasswordHash())) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid email or password");
+        }
+
+        if (user.getAccountStatus() != AccountStatus.ACTIVE) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Account is not active");
+        }
+
+        SubscriptionTier tier = resolveCurrentTier(user.getId());
+        JwtService.TokenPair tokenPair = jwtService.issueTokenPair(user.getId(), user.getEmail(), tier);
+    LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
+
+    UserSession session = new UserSession();
+    session.setUserId(user.getId());
+    session.setRefreshTokenJti(tokenPair.refreshTokenJti());
+    session.setUserAgent(sanitizeUserAgent(command.userAgent()));
+    session.setIpAddress(normalizeIp(command.ipAddress()));
+    session.setLastActive(nowUtc);
+    session.setExpiresAt(LocalDateTime.ofInstant(tokenPair.refreshTokenExpiresAt(), ZoneOffset.UTC));
+    session.setIsRevoked(false);
+    userSessionRepository.save(session);
+
+        return new AuthTokens(
+                user.getId(),
+                tier,
+                tokenPair.accessToken(),
+                tokenPair.accessTokenExpiresAt(),
+                tokenPair.refreshToken(),
+                tokenPair.refreshTokenExpiresAt()
+        );
+    }
+
+    @Transactional
+    public AuthTokens refresh(RefreshCommand command) {
+        String refreshToken = command.refreshToken();
+        if (refreshToken == null || refreshToken.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Refresh token is required");
+        }
+
+        if (tokenBlacklistRepository.existsByToken(refreshToken)) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Refresh token is revoked");
+        }
+
+        if (!jwtService.isTokenValid(refreshToken, JwtService.TokenType.REFRESH)) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid or expired refresh token");
+        }
+
+        Long userId = jwtService.extractUserId(refreshToken);
+        String refreshTokenJti = jwtService.extractRefreshTokenJti(refreshToken);
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
+
+        UserSession existingSession = userSessionRepository
+            .findFirstByUserIdAndRefreshTokenJtiAndIsRevokedFalseAndExpiresAtAfter(
+                userId,
+                refreshTokenJti,
+                nowUtc
+            )
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Refresh session is revoked or expired"));
+
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User not found"));
+
+        if (user.getAccountStatus() != AccountStatus.ACTIVE) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Account is not active");
+        }
+
+        blacklistToken(refreshToken, jwtService.extractExpiration(refreshToken), nowUtc);
+
+        SubscriptionTier tier = resolveCurrentTier(user.getId());
+        JwtService.TokenPair tokenPair = jwtService.issueTokenPair(user.getId(), user.getEmail(), tier);
+
+        existingSession.setRefreshTokenJti(tokenPair.refreshTokenJti());
+        if (command.userAgent() != null && !command.userAgent().isBlank()) {
+            existingSession.setUserAgent(sanitizeUserAgent(command.userAgent()));
+        }
+        if (command.ipAddress() != null && !command.ipAddress().isBlank()) {
+            existingSession.setIpAddress(normalizeIp(command.ipAddress()));
+        }
+        existingSession.setLastActive(nowUtc);
+        existingSession.setExpiresAt(LocalDateTime.ofInstant(tokenPair.refreshTokenExpiresAt(), ZoneOffset.UTC));
+        existingSession.setIsRevoked(false);
+        userSessionRepository.save(existingSession);
+
+        return new AuthTokens(
+                user.getId(),
+                tier,
+            tokenPair.accessToken(),
+            tokenPair.accessTokenExpiresAt(),
+            tokenPair.refreshToken(),
+            tokenPair.refreshTokenExpiresAt()
+        );
+    }
+
+    @Transactional
+    public void logout(String authorizationHeader) {
+        String token = extractBearerToken(authorizationHeader);
+        if (token == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing Authorization bearer token");
+        }
+
+        if (!jwtService.isTokenValid(token, JwtService.TokenType.ACCESS)) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid or expired access token");
+        }
+
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
+        blacklistToken(token, jwtService.extractExpiration(token), nowUtc);
+
+        Long userId = jwtService.extractUserId(token);
+        String refreshTokenJti = jwtService.extractRefreshTokenJti(token);
+        userSessionRepository
+                .findFirstByUserIdAndRefreshTokenJtiAndIsRevokedFalseAndExpiresAtAfter(
+                        userId,
+                        refreshTokenJti,
+                        nowUtc
+                )
+                .ifPresent(session -> {
+                    session.setIsRevoked(true);
+                    session.setLastActive(nowUtc);
+                    userSessionRepository.save(session);
+                });
+    }
+
+    private void blacklistToken(String token, Instant expiresAt, LocalDateTime nowUtc) {
+        if (tokenBlacklistRepository.existsByToken(token)) {
+            return;
+        }
+
+        TokenBlacklist blacklist = new TokenBlacklist();
+        blacklist.setToken(token);
+        blacklist.setExpiresAt(LocalDateTime.ofInstant(expiresAt, ZoneOffset.UTC));
+        blacklist.setCreatedAt(nowUtc);
+        tokenBlacklistRepository.save(blacklist);
+    }
+
+    private SubscriptionTier resolveCurrentTier(Long userId) {
+        return subscriptionRepository
+                .findFirstByUserIdAndTierAndStatusOrderByStartedAtDesc(
+                        userId,
+                        SubscriptionTier.PREMIUM,
+                        SubscriptionStatus.ACTIVE
+                )
+                .map(Subscription::getTier)
+                .orElse(SubscriptionTier.FREE);
+    }
+
+    private String normalizeEmail(String email) {
+        return email.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizePhone(String phone) {
+        if (phone == null || phone.isBlank()) {
+            return null;
+        }
+        return phone.trim();
+    }
+
+    private String sanitizeUserAgent(String userAgent) {
+        if (userAgent == null || userAgent.isBlank()) {
+            return "unknown";
+        }
+        String normalized = userAgent.trim();
+        return normalized.length() > 512 ? normalized.substring(0, 512) : normalized;
+    }
+
+    private String normalizeIp(String ipAddress) {
+        if (ipAddress == null || ipAddress.isBlank()) {
+            return null;
+        }
+        String normalized = ipAddress.trim();
+        return normalized.length() > 64 ? normalized.substring(0, 64) : normalized;
+    }
+
+    private String extractBearerToken(String authorizationHeader) {
+        if (authorizationHeader == null) {
+            return null;
+        }
+        String prefix = "Bearer ";
+        if (!authorizationHeader.startsWith(prefix)) {
+            return null;
+        }
+        String token = authorizationHeader.substring(prefix.length()).trim();
+        return token.isBlank() ? null : token;
+    }
+
+    public record RegisterCommand(String email, String password, String fullName, String phone) {
+    }
+
+    public record LoginCommand(String email, String password, String userAgent, String ipAddress) {
+    }
+
+    public record RefreshCommand(String refreshToken, String userAgent, String ipAddress) {
+    }
+
+    public record RegisteredUser(Long userId, String email, String fullName, SubscriptionTier tier) {
+    }
+
+    public record AuthTokens(
+            Long userId,
+            SubscriptionTier tier,
+            String accessToken,
+            Instant accessTokenExpiresAt,
+            String refreshToken,
+            Instant refreshTokenExpiresAt
+    ) {
+    }
+}

@@ -1,0 +1,44 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: core-backend
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:egx_portfolio}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${DB_USER:egx_user}
+    password: ${DB_PASSWORD:egx_pass}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+    open-in-view: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+ai:
+  engine:
+    base-url: ${AI_ENGINE_URL:http://ai-engine:8000}
+
+app:
+  security:
+    require-auth: ${APP_SECURITY_REQUIRE_AUTH:true}
+    allowed-origin-patterns: ${APP_SECURITY_ALLOWED_ORIGIN_PATTERNS:http://localhost:3000,http://localhost:5173,http://localhost:8080}
+    token-blacklist-cleanup-cron: ${APP_SECURITY_TOKEN_BLACKLIST_CLEANUP_CRON:0 0 3 * * *}
+    jwt:
+      secret: ${JWT_SECRET:EGXPortfolioOptimizerJwtSecretKey_ReplaceForProd_2026}
+      access-token-minutes: ${APP_SECURITY_JWT_ACCESS_TOKEN_MINUTES:15}
+      refresh-token-days: ${APP_SECURITY_JWT_REFRESH_TOKEN_DAYS:7}
