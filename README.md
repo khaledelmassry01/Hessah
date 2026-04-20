@@ -21,7 +21,7 @@ This repository delivers an end-to-end flow for investment portfolio generation 
 
 - `services/core-backend`
   - Spring Boot 3.3.5 (Java 17)
-  - REST APIs, domain services, Flyway migrations, scheduler, premium controls
+  - REST APIs, domain services, static SQL schema validation, scheduler, premium controls
 - `services/ai-engine`
   - FastAPI
   - Mean-variance optimization, constraints, and backtesting pipeline

@@ -2,12 +2,12 @@ package com.egx.core.security;
 
 import io.github.bucket4j.Bandwidth;
 import io.github.bucket4j.Bucket;
-import io.github.bucket4j.Refill;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -63,8 +63,10 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
 
     private Bucket newBucket(String path) {
         int capacity = path.endsWith("/register") ? registerCapacity : loginCapacity;
-        Refill refill = Refill.intervally(capacity, Duration.ofMinutes(refillMinutes));
-        Bandwidth bandwidth = Bandwidth.classic(capacity, refill);
+        Bandwidth bandwidth = Bandwidth.builder()
+                .capacity(capacity)
+                .refillGreedy(capacity, Duration.ofMinutes(refillMinutes))
+                .build();
         return Bucket.builder().addLimit(bandwidth).build();
     }
 
@@ -98,7 +100,7 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     }
 
     private void rejectRateLimited(HttpServletResponse response) throws IOException {
-        response.setStatus(HttpServletResponse.SC_TOO_MANY_REQUESTS);
+        response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.getWriter().write("{\"error\":\"Too many authentication attempts. Please try again shortly.\"}");
     }

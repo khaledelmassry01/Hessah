@@ -4,6 +4,8 @@ server:
 spring:
   application:
     name: core-backend
+  flyway:
+    enabled: false
   datasource:
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:egx_portfolio}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
     username: ${DB_USER:egx_user}
@@ -11,7 +13,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
   jpa:
     hibernate:
-      ddl-auto: none
+      ddl-auto: update
     properties:
       hibernate:
         format_sql: true
@@ -36,7 +38,7 @@ ai:
 app:
   security:
     require-auth: ${APP_SECURITY_REQUIRE_AUTH:true}
-    allowed-origin-patterns: ${APP_SECURITY_ALLOWED_ORIGIN_PATTERNS:http://localhost:3000,http://localhost:5173,http://localhost:8080}
+    allowed-origin-patterns: ${APP_SECURITY_ALLOWED_ORIGIN_PATTERNS:http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173,http://[::1]:5173,http://localhost:8082,http://127.0.0.1:8082,http://[::1]:8082,http://localhost:8080}
     token-blacklist-cleanup-cron: ${APP_SECURITY_TOKEN_BLACKLIST_CLEANUP_CRON:0 0 3 * * *}
     cookies:
       secure: ${APP_SECURITY_COOKIES_SECURE:true}

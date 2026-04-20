@@ -1,10 +1,15 @@
 package com.egx.core.config;
 
-import com.egx.core.security.JwtAuthFilter;
-import com.egx.core.security.SecurityRateLimitingFilter;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.stream.Collectors;
+
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -18,45 +23,40 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.Locale;
-import java.util.stream.Collectors;
+import com.egx.core.security.AuthRateLimitFilter;
+import com.egx.core.security.JwtAuthFilter;
+import com.egx.core.security.SecurityRateLimitingFilter;
 
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
 
-import com.egx.core.security.AuthRateLimitFilter;
     private final boolean requireAuth;
     private final boolean productionMode;
     private final boolean forceHttps;
-    private final String allowedOrigins;
-    private final JwtAuthFilter jwtAuthFilter;
+    private final String allowedOriginPatterns;
+    private final AuthRateLimitFilter authRateLimitFilter;
     private final SecurityRateLimitingFilter securityRateLimitingFilter;
 
     public SecurityConfig(
-    private final AuthRateLimitFilter authRateLimitFilter;
             @Value("${app.security.require-auth:true}") boolean requireAuth,
             @Value("${app.security.production-mode:false}") boolean productionMode,
             @Value("${app.security.force-https:false}") boolean forceHttps,
-            @Value("${app.security.allowed-origins:http://localhost:3000,http://localhost:5173,http://localhost:8080}")
-            String allowedOrigins,
-            JwtAuthFilter jwtAuthFilter,
+            @Value("${app.security.allowed-origin-patterns:http://localhost:3000,http://localhost:5173,http://localhost:8080}")
+            String allowedOriginPatterns,
+            AuthRateLimitFilter authRateLimitFilter,
             SecurityRateLimitingFilter securityRateLimitingFilter
     ) {
         this.requireAuth = requireAuth;
         this.productionMode = productionMode;
-            AuthRateLimitFilter authRateLimitFilter,
         this.forceHttps = forceHttps;
-        this.allowedOrigins = allowedOrigins;
-        this.jwtAuthFilter = jwtAuthFilter;
+        this.allowedOriginPatterns = allowedOriginPatterns;
+        this.authRateLimitFilter = authRateLimitFilter;
         this.securityRateLimitingFilter = securityRateLimitingFilter;
     }
 
     @Bean
-        this.authRateLimitFilter = authRateLimitFilter;
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, @Lazy JwtAuthFilter jwtAuthFilter) throws Exception {
         if (forceHttps) {
             http.requiresChannel(channel -> channel.anyRequest().requiresSecure());
         }
@@ -68,7 +68,8 @@ import com.egx.core.security.AuthRateLimitFilter;
                 .httpBasic(AbstractHttpConfigurer::disable)
                 .formLogin(AbstractHttpConfigurer::disable)
                 .headers(headers -> headers
-                        .contentTypeOptions(contentTypeOptions -> {})
+                        .contentTypeOptions(contentTypeOptions -> {
+                        })
                         .frameOptions(frameOptions -> frameOptions.deny())
                         .contentSecurityPolicy(csp -> csp.policyDirectives(
                                 "default-src 'self'; "
@@ -91,25 +92,55 @@ import com.egx.core.security.AuthRateLimitFilter;
 
                     // Auth endpoints stay open by design.
                     auth.requestMatchers("/auth/**", "/api/core/auth/**").permitAll();
-                .addFilterBefore(authRateLimitFilter, JwtAuthFilter.class)
 
                     // User profile and session endpoints must always be authenticated.
                     auth.requestMatchers("/users/**", "/api/core/users/**").authenticated();
 
-            // Premium-only API surface.
-            auth.requestMatchers(
-                "/premium/**",
-                "/api/core/premium/**",
-        cors.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With", "X-Session-Id"));
-        cors.setExposedHeaders(List.of("Authorization", "X-Session-Id"));
-        cors.setAllowCredentials(true);
+                    // Premium-only API surface.
+                    auth.requestMatchers(
+                            "/premium/**",
+                            "/api/core/premium/**",
+                            "/ai/performance-summary",
+                            "/api/core/ai/performance-summary"
+                    ).hasRole("PREMIUM");
+
+                    // Protect all gateway-routed core APIs.
+                    auth.requestMatchers("/api/core/**").authenticated();
+
+                    if (requireAuth) {
+                        auth.anyRequest().authenticated();
+                    } else {
                         auth.anyRequest().permitAll();
                     }
                 })
-                .addFilterBefore(securityRateLimitingFilter, JwtAuthFilter.class)
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(authRateLimitFilter, JwtAuthFilter.class)
+                .addFilterBefore(securityRateLimitingFilter, AuthRateLimitFilter.class);
 
         return http.build();
+    }
+
+    @Bean
+    public FilterRegistrationBean<JwtAuthFilter> jwtAuthFilterRegistration(JwtAuthFilter filter) {
+        FilterRegistrationBean<JwtAuthFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    public FilterRegistrationBean<AuthRateLimitFilter> authRateLimitFilterRegistration(AuthRateLimitFilter filter) {
+        FilterRegistrationBean<AuthRateLimitFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    public FilterRegistrationBean<SecurityRateLimitingFilter> securityRateLimitingFilterRegistration(
+            SecurityRateLimitingFilter filter
+    ) {
+        FilterRegistrationBean<SecurityRateLimitingFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
     }
 
     @Bean
@@ -120,7 +151,7 @@ import com.egx.core.security.AuthRateLimitFilter;
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration cors = new CorsConfiguration();
-        cors.setAllowedOrigins(parseAllowedOrigins(allowedOrigins));
+        cors.setAllowedOriginPatterns(parseAllowedOrigins(allowedOriginPatterns));
         cors.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         cors.setAllowedHeaders(List.of(
                 "Authorization",
@@ -130,7 +161,7 @@ import com.egx.core.security.AuthRateLimitFilter;
                 "X-Requested-With",
                 "X-Session-Id"
         ));
-        cors.setExposedHeaders(List.of("X-Session-Id"));
+        cors.setExposedHeaders(List.of("Authorization", "X-Session-Id"));
         cors.setAllowCredentials(true);
         cors.setMaxAge(3600L);
 

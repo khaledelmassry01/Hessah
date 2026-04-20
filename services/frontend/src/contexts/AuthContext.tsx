@@ -86,17 +86,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     async function bootstrap() {
       const stored = readTokens();
-      if (!stored) {
-        if (!cancelled) {
-          setIsInitializing(false);
+      if (stored) {
+        try {
+          await hydrateFromTokens(stored);
+        } catch {
+          clearAuthState();
+        } finally {
+          if (!cancelled) {
+            setIsInitializing(false);
+          }
         }
+
         return;
       }
 
       try {
-        await hydrateFromTokens(stored);
+        const profile = await fetchCurrentUser();
+        if (!cancelled) {
+          setUser(profile);
+          setIsInitializing(false);
+        }
       } catch {
-        clearAuthState();
+        if (!cancelled) {
+          clearAuthState();
+        }
       } finally {
         if (!cancelled) {
           setIsInitializing(false);
@@ -154,7 +167,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [clearAuthState]);
 
-  const isAuthenticated = Boolean(tokens?.accessToken);
+  const isAuthenticated = Boolean(user) || Boolean(tokens?.accessToken);
   const tier = (user?.tier || tokens?.tier || "FREE").toUpperCase();
   const isPremium = tier === "PREMIUM";
 

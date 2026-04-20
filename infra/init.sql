@@ -1,10 +1,20 @@
+-- EGX production database initialization script for MySQL 8.0
+-- Consolidated from V1..V9 migrations.
+
+SET NAMES utf8mb4;
+SET time_zone = '+00:00';
+
+-- -----------------------------------------------------------------------------
+-- V1__baseline_schema.sql
+-- -----------------------------------------------------------------------------
+
 CREATE TABLE users (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     public_uuid CHAR(36) NOT NULL,
     email VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
-    full_name VARCHAR(255) NOT NULL,
-    phone VARCHAR(40),
+    full_name VARCHAR(1024) NOT NULL,
+    phone VARCHAR(255),
     kyc_status ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     account_status ENUM('ACTIVE', 'SUSPENDED', 'CLOSED') NOT NULL DEFAULT 'ACTIVE',
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -30,7 +40,7 @@ CREATE INDEX ix_subscriptions_user_tier_status ON subscriptions (user_id, tier, 
 CREATE TABLE wallets (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
-    currency CHAR(3) NOT NULL DEFAULT 'EGP',
+    currency VARCHAR(3) NOT NULL DEFAULT 'EGP',
     available_balance DECIMAL(19, 4) NOT NULL DEFAULT 0.0000,
     locked_balance DECIMAL(19, 4) NOT NULL DEFAULT 0.0000,
     version BIGINT NOT NULL DEFAULT 0,
@@ -72,6 +82,7 @@ CREATE TABLE stock_instruments (
     isin VARCHAR(32),
     name VARCHAR(255) NOT NULL,
     sector_code VARCHAR(64) NOT NULL,
+    last_price DECIMAL(19, 4) NULL DEFAULT 0.0000,
     is_suspended BOOLEAN NOT NULL DEFAULT FALSE,
     suspension_reason VARCHAR(255),
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -315,3 +326,288 @@ CREATE TABLE ai_prediction_audit (
     CONSTRAINT fk_ai_prediction_audit_run_id FOREIGN KEY (portfolio_run_id) REFERENCES portfolio_runs (id)
 ) ENGINE=InnoDB;
 CREATE INDEX ix_ai_prediction_audit_run_created ON ai_prediction_audit (portfolio_run_id, created_at);
+
+-- -----------------------------------------------------------------------------
+-- V2__database_triggers.sql
+-- -----------------------------------------------------------------------------
+
+DELIMITER $$
+
+CREATE TRIGGER trg_wallet_nonnegative_before_update
+BEFORE UPDATE ON wallets
+FOR EACH ROW
+BEGIN
+    IF NEW.available_balance < 0 OR NEW.locked_balance < 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Wallet balances cannot be negative';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_trade_order_settlement_t2_before_insert
+BEFORE INSERT ON trade_orders
+FOR EACH ROW
+BEGIN
+    IF NEW.trade_date IS NULL THEN
+        SET NEW.trade_date = CURRENT_DATE();
+    END IF;
+
+    IF NEW.settlement_date IS NULL THEN
+        SET NEW.settlement_date = DATE_ADD(NEW.trade_date, INTERVAL 2 DAY);
+    END IF;
+
+    IF NEW.settlement_status IS NULL THEN
+        SET NEW.settlement_status = 'PENDING';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_sell_block_uncleared_before_insert
+BEFORE INSERT ON trade_orders
+FOR EACH ROW
+BEGIN
+    DECLARE cleared_qty BIGINT DEFAULT 0;
+
+    IF NEW.side = 'SELL' THEN
+        SELECT COALESCE(SUM(quantity_available), 0)
+          INTO cleared_qty
+          FROM position_lots
+         WHERE user_id = NEW.user_id
+           AND stock_id = NEW.stock_id
+           AND settlement_status = 'CLEARED';
+
+        IF cleared_qty < NEW.order_qty THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'Insufficient cleared quantity for SELL order (T+2 rule)';
+        END IF;
+    END IF;
+END$$
+
+CREATE TRIGGER trg_default_subscription_tier_before_insert
+BEFORE INSERT ON subscriptions
+FOR EACH ROW
+BEGIN
+    IF NEW.tier IS NULL THEN
+        SET NEW.tier = 'FREE';
+    END IF;
+
+    IF NEW.status IS NULL THEN
+        SET NEW.status = 'ACTIVE';
+    END IF;
+
+    IF NEW.started_at IS NULL THEN
+        SET NEW.started_at = CURRENT_TIMESTAMP(6);
+    END IF;
+END$$
+
+CREATE TRIGGER trg_allocation_shares_integrity_before_insert
+BEFORE INSERT ON allocation_executions
+FOR EACH ROW
+BEGIN
+    IF NEW.executed_shares IS NULL THEN
+        SET NEW.executed_shares = 0;
+    END IF;
+
+    IF NEW.executed_shares < 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'executed_shares cannot be negative';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_allocation_shares_integrity_before_update
+BEFORE UPDATE ON allocation_executions
+FOR EACH ROW
+BEGIN
+    IF NEW.executed_shares < 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'executed_shares cannot be negative';
+    END IF;
+END$$
+
+DELIMITER ;
+
+-- -----------------------------------------------------------------------------
+-- V3__seed_reference_data.sql
+-- -----------------------------------------------------------------------------
+
+INSERT INTO sector_reference (code, name) VALUES
+    ('BANKS', 'Banks'),
+    ('FIN_SERV', 'Financial Services'),
+    ('INDUSTRIALS', 'Industrials'),
+    ('REAL_ESTATE', 'Real Estate'),
+    ('TELECOM', 'Telecommunication'),
+    ('ENERGY', 'Energy'),
+    ('CONSUMER', 'Consumer Staples & Discretionary'),
+    ('HEALTHCARE', 'Healthcare'),
+    ('MATERIALS', 'Materials'),
+    ('TRANSPORT', 'Transport & Logistics'),
+    ('UTILITIES', 'Utilities')
+ON DUPLICATE KEY UPDATE
+    name = VALUES(name),
+    is_active = TRUE;
+
+INSERT INTO risk_profiles (
+    code,
+    description,
+    max_sector_weight,
+    max_adv30_participation,
+    premium_required
+) VALUES
+    ('LOW', 'Long-term conservative profile for freemium users', 0.4000, 0.0500, FALSE),
+    ('MEDIUM', 'Balanced growth profile for premium users', 0.4000, 0.0500, TRUE),
+    ('HIGH', 'Aggressive profile for premium users', 0.4000, 0.0500, TRUE)
+ON DUPLICATE KEY UPDATE
+    description = VALUES(description),
+    max_sector_weight = VALUES(max_sector_weight),
+    max_adv30_participation = VALUES(max_adv30_participation),
+    premium_required = VALUES(premium_required);
+
+-- -----------------------------------------------------------------------------
+-- V4__extend_stop_alert_status.sql
+-- -----------------------------------------------------------------------------
+
+ALTER TABLE stop_alerts
+    MODIFY COLUMN alert_status ENUM('TRIGGERED', 'OPEN', 'RESOLVED', 'DISMISSED') NOT NULL DEFAULT 'OPEN';
+
+-- -----------------------------------------------------------------------------
+-- V5__add_token_blacklist.sql
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE token_blacklist (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    token VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    expires_at DATETIME(6) NOT NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT uq_token_blacklist_token UNIQUE (token)
+) ENGINE=InnoDB;
+
+CREATE INDEX ix_token_blacklist_expires_at ON token_blacklist (expires_at);
+
+-- -----------------------------------------------------------------------------
+-- V6__add_user_sessions.sql
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE user_sessions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    refresh_token_jti VARCHAR(64) NOT NULL,
+    user_agent VARCHAR(512) NULL,
+    ip_address VARCHAR(64) NULL,
+    last_active DATETIME(6) NOT NULL,
+    expires_at DATETIME(6) NOT NULL,
+    is_revoked TINYINT(1) NOT NULL DEFAULT 0,
+    CONSTRAINT fk_user_sessions_user_id FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT uq_user_sessions_refresh_token_jti UNIQUE (refresh_token_jti)
+) ENGINE=InnoDB;
+
+CREATE INDEX ix_user_sessions_user_active ON user_sessions (user_id, is_revoked, expires_at);
+CREATE INDEX ix_user_sessions_last_active ON user_sessions (last_active);
+
+-- -----------------------------------------------------------------------------
+-- V7__historical_market_data_and_model_performance.sql
+-- -----------------------------------------------------------------------------
+
+ALTER TABLE market_daily_bars
+    ADD COLUMN open_price DECIMAL(19, 4) NULL AFTER trade_date,
+    ADD COLUMN high_price DECIMAL(19, 4) NULL AFTER open_price,
+    ADD COLUMN low_price DECIMAL(19, 4) NULL AFTER high_price;
+
+UPDATE market_daily_bars
+SET open_price = close_price,
+    high_price = close_price,
+    low_price = close_price
+WHERE open_price IS NULL
+   OR high_price IS NULL
+   OR low_price IS NULL;
+
+ALTER TABLE market_daily_bars
+    MODIFY COLUMN open_price DECIMAL(19, 4) NOT NULL,
+    MODIFY COLUMN high_price DECIMAL(19, 4) NOT NULL,
+    MODIFY COLUMN low_price DECIMAL(19, 4) NOT NULL;
+
+CREATE TABLE model_performance_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64),
+    user_id BIGINT,
+    risk_level VARCHAR(16) NOT NULL,
+    model_version VARCHAR(64) NOT NULL,
+    historical_date DATE NOT NULL,
+    evaluation_date DATE NOT NULL,
+    horizon_days INT NOT NULL,
+    budget_egp DECIMAL(19, 4) NOT NULL,
+    predicted_return DECIMAL(12, 8) NOT NULL,
+    actual_return DECIMAL(12, 8) NOT NULL,
+    prediction_error DECIMAL(12, 8) NOT NULL,
+    risk_free_rate DECIMAL(8, 6) NOT NULL,
+    covariance_shrinkage DECIMAL(8, 6) NOT NULL,
+    run_status VARCHAR(16) NOT NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT fk_model_performance_user_id FOREIGN KEY (user_id) REFERENCES users (id)
+) ENGINE=InnoDB;
+
+CREATE INDEX ix_model_performance_risk_created
+    ON model_performance_logs (risk_level, created_at);
+
+CREATE INDEX ix_model_performance_params
+    ON model_performance_logs (risk_level, risk_free_rate, covariance_shrinkage);
+
+-- -----------------------------------------------------------------------------
+-- V8__add_stock_last_price.sql
+-- -----------------------------------------------------------------------------
+
+SET @has_last_price := (
+    SELECT COUNT(*)
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = 'stock_instruments'
+      AND column_name = 'last_price'
+);
+
+SET @add_last_price_sql := IF(
+    @has_last_price = 0,
+    'ALTER TABLE stock_instruments ADD COLUMN last_price DECIMAL(19, 4) NULL DEFAULT 0.0000 AFTER sector_code',
+    'SELECT 1'
+);
+
+PREPARE add_last_price_stmt FROM @add_last_price_sql;
+EXECUTE add_last_price_stmt;
+DEALLOCATE PREPARE add_last_price_stmt;
+
+ALTER TABLE stock_instruments
+    MODIFY COLUMN last_price DECIMAL(19, 4) NULL DEFAULT 0.0000;
+
+UPDATE stock_instruments si
+JOIN (
+    SELECT m.stock_id, m.close_price
+    FROM market_daily_bars m
+    JOIN (
+        SELECT stock_id, MAX(trade_date) AS latest_trade_date
+        FROM market_daily_bars
+        GROUP BY stock_id
+    ) latest ON latest.stock_id = m.stock_id AND latest.latest_trade_date = m.trade_date
+) lp ON lp.stock_id = si.id
+SET si.last_price = lp.close_price;
+
+UPDATE stock_instruments
+SET last_price = 0.0000
+WHERE last_price IS NULL;
+
+-- -----------------------------------------------------------------------------
+-- V9__security_hardening.sql
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS security_audit_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NULL,
+    action VARCHAR(64) NOT NULL,
+    outcome VARCHAR(16) NOT NULL,
+    ip_address VARCHAR(64) NULL,
+    user_agent VARCHAR(512) NULL,
+    details_json JSON NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT fk_security_audit_logs_user_id FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+CREATE INDEX ix_security_audit_logs_user_created
+    ON security_audit_logs (user_id, created_at);
+
+CREATE INDEX ix_security_audit_logs_action_created
+    ON security_audit_logs (action, created_at);

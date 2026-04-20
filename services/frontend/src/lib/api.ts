@@ -35,7 +35,7 @@ type AnyRecord = Record<string, unknown>;
 const SESSION_ID_HEADER = "x-session-id";
 
 export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL?.trim() || "http://localhost:8080/api/core";
+  import.meta.env.VITE_API_BASE_URL?.trim() || "/api/core";
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -203,13 +203,6 @@ apiClient.interceptors.response.use(
     }
 
     const storedTokens = readTokens();
-    if (!storedTokens?.refreshToken) {
-      clearTokens();
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("auth:logout"));
-      }
-      return Promise.reject(error);
-    }
 
     if (originalRequest._retry) {
       return Promise.reject(error);
@@ -236,11 +229,13 @@ apiClient.interceptors.response.use(
     isRefreshing = true;
 
     try {
-      const refreshPayload: Record<string, unknown> = {
-        refreshToken: storedTokens.refreshToken,
-      };
+      const refreshPayload: Record<string, unknown> = {};
 
-      if (storedTokens.sessionId) {
+      if (storedTokens?.refreshToken) {
+        refreshPayload.refreshToken = storedTokens.refreshToken;
+      }
+
+      if (storedTokens?.sessionId) {
         refreshPayload.sessionId = storedTokens.sessionId;
       }
 
@@ -259,14 +254,14 @@ apiClient.interceptors.response.use(
 
       const refreshedTokens = normalizeTokenPayload(
         refreshResponse.data,
-        storedTokens.refreshToken,
+        storedTokens?.refreshToken,
       );
 
       const sessionIdFromHeaders = getSessionIdFromHeaders(refreshResponse.headers);
       const rotatedTokens: AuthTokenBundle = {
         ...refreshedTokens,
         sessionId:
-          refreshedTokens.sessionId || sessionIdFromHeaders || storedTokens.sessionId,
+          refreshedTokens.sessionId || sessionIdFromHeaders || storedTokens?.sessionId,
       };
 
       writeTokens(rotatedTokens);

@@ -7,6 +7,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -33,7 +34,7 @@ public class SecurityRateLimitingFilter extends OncePerRequestFilter {
             @Value("${app.security.rate-limit.auth-ip.window-seconds:300}") long authIpWindowSeconds,
             @Value("${app.security.rate-limit.session.max-requests:300}") int sessionMaxRequests,
             @Value("${app.security.rate-limit.session.window-seconds:60}") long sessionWindowSeconds,
-            @Value("${app.security.cookies.access-token-name:egx_access_token}") String accessTokenCookieName
+                @Value("${app.security.cookies.access-cookie-name:egx_access_token}") String accessTokenCookieName
     ) {
         this.rateLimiterService = rateLimiterService;
         this.jwtService = jwtService;
@@ -154,7 +155,7 @@ public class SecurityRateLimitingFilter extends OncePerRequestFilter {
             SecurityRateLimiterService.RateLimitDecision decision,
             String message
     ) throws IOException {
-        response.setStatus(HttpServletResponse.SC_TOO_MANY_REQUESTS);
+        response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
         response.setHeader("Retry-After", String.valueOf(decision.retryAfterSeconds()));
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.getWriter().write("{\"error\":\"" + message + "\"}");

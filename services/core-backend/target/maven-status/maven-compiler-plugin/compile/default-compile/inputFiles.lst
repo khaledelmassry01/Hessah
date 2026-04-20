@@ -67,6 +67,7 @@ C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\domain\Reba
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\domain\RebalancePolicy.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\domain\RiskProfile.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\domain\SectorReference.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\domain\SecurityAuditLog.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\domain\StockInstrument.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\domain\StopAlert.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\domain\StopRule.java
@@ -90,6 +91,7 @@ C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\PositionLotRepository.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\RebalanceAlertRepository.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\SectorReferenceRepository.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\SecurityAuditLogRepository.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\StockInstrumentRepository.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\StopAlertRepository.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\StopRuleRepository.java
@@ -100,8 +102,14 @@ C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\UserSessionRepository.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\WalletLedgerEntryRepository.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\repository\WalletRepository.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\security\AesStringAttributeConverter.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\security\AuthCookieService.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\security\AuthRateLimitFilter.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\security\EncryptionKeyProvider.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\security\JwtAuthFilter.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\security\JwtService.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\security\SecurityRateLimiterService.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\security\SecurityRateLimitingFilter.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\AllocationService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\AuthService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\InstrumentSyncService.java
@@ -112,6 +120,7 @@ C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\Mod
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\OrderService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\PortfolioService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\PremiumAccessService.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\SecurityAuditService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\SessionService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\TearSheetService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\TokenBlacklistCleanupService.java
