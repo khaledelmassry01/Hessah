@@ -1,31 +1,31 @@
 package com.egx.core.security;
 
-import com.egx.core.domain.User;
-import com.egx.core.domain.enums.AccountStatus;
-import com.egx.core.domain.enums.SubscriptionTier;
-import com.egx.core.repository.TokenBlacklistRepository;
-import com.egx.core.repository.UserRepository;
-import com.egx.core.repository.UserSessionRepository;
-import io.jsonwebtoken.JwtException;
-import jakarta.servlet.FilterChain;
-import jakarta.servlet.ServletException;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.List;
+
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
-import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-import java.io.IOException;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.util.List;
+import com.egx.core.domain.User;
+import com.egx.core.domain.enums.AccountStatus;
+import com.egx.core.domain.enums.SubscriptionTier;
+import com.egx.core.repository.TokenBlacklistRepository;
+import com.egx.core.repository.UserRepository;
+import com.egx.core.repository.UserSessionRepository;
 
-@Component
+import io.jsonwebtoken.JwtException;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
@@ -146,8 +146,14 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         return path.equals("/error")
                 || path.equals("/actuator/health")
                 || path.equals("/actuator/info")
-            || path.equals("/instruments/bulk")
-            || path.equals("/api/core/instruments/bulk")
+                || path.equals("/instruments/bulk")
+                || path.equals("/api/core/instruments/bulk")
+                || path.equals("/instruments")
+                || path.equals("/instruments/catalog")
+                || path.equals("/instruments/ids")
+                || path.equals("/api/core/instruments")
+                || path.equals("/api/core/instruments/catalog")
+                || path.equals("/api/core/instruments/ids")
                 || path.equals("/market-data/bulk")
                 || path.equals("/api/core/market-data/bulk")
                 || path.startsWith("/model-performance/")

@@ -37,6 +37,8 @@ const SESSION_ID_HEADER = "x-session-id";
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.trim() || "/api/core";
 
+axios.defaults.withCredentials = true;
+
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
@@ -509,7 +511,12 @@ function normalizeInstruments(raw: unknown): InstrumentSummary[] {
   return raw
     .filter((item): item is AnyRecord => isRecord(item))
     .map((item) => ({
-      id: toNumber(item.id),
+      id:
+        toNumber(item.id) ??
+        toNumber(item.instrumentId) ??
+        toNumber(item.instrument_id) ??
+        toNumber(item.stockId) ??
+        toNumber(item.stock_id),
       symbol:
         toStringValue(item.symbol) ||
         toStringValue(item.ticker) ||
@@ -684,9 +691,10 @@ export async function fetchLatestPortfolio(userId: number): Promise<PortfolioRes
     data = response.data;
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) {
-      throw new Error(
-        "Portfolio read model endpoint is unavailable. Expected GET /users/{userId}/portfolio/latest.",
-      );
+      return {
+        status: "NO_PORTFOLIO",
+        allocations: [],
+      };
     }
 
     throw error;

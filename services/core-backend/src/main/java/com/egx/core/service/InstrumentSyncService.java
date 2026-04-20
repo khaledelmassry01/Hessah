@@ -1,17 +1,22 @@
 package com.egx.core.service;
 
-import com.egx.core.domain.SectorReference;
-import com.egx.core.domain.StockInstrument;
-import com.egx.core.repository.SectorReferenceRepository;
-import com.egx.core.repository.StockInstrumentRepository;
+import java.time.LocalDateTime;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.time.LocalDateTime;
-import java.util.List;
+import com.egx.core.domain.SectorReference;
+import com.egx.core.domain.StockInstrument;
+import com.egx.core.repository.SectorReferenceRepository;
+import com.egx.core.repository.StockInstrumentRepository;
 
 @Service
 public class InstrumentSyncService {
@@ -22,8 +27,42 @@ public class InstrumentSyncService {
     private static final int NAME_MAX_LENGTH = 255;
     private static final int SECTOR_CODE_MAX_LENGTH = 64;
     private static final int SECTOR_NAME_MAX_LENGTH = 128;
+    private static final String EGX_SUFFIX = ".CA";
     private static final String DEFAULT_SECTOR_CODE = "FIN_SERV";
     private static final String DEFAULT_SECTOR_NAME = "Financial Services";
+
+    private static final List<InstrumentUpsertCommand> EGX30_FALLBACK = List.of(
+            new InstrumentUpsertCommand("COMI.CA", "Commercial International Bank", "Banks"),
+            new InstrumentUpsertCommand("HRHO.CA", "EFG Holding", "Financial Services"),
+            new InstrumentUpsertCommand("SWDY.CA", "Elsewedy Electric", "Industrials"),
+            new InstrumentUpsertCommand("ETEL.CA", "Telecom Egypt", "Telecommunications"),
+            new InstrumentUpsertCommand("EFIH.CA", "eFinance Investment Group", "Technology"),
+            new InstrumentUpsertCommand("ABUK.CA", "Abu Qir Fertilizers", "Materials"),
+            new InstrumentUpsertCommand("FWRY.CA", "Fawry", "Technology"),
+            new InstrumentUpsertCommand("PHDC.CA", "Palm Hills Development", "Real Estate"),
+            new InstrumentUpsertCommand("TMGH.CA", "Talaat Moustafa Group", "Real Estate"),
+            new InstrumentUpsertCommand("ORWE.CA", "Oriental Weavers", "Consumer Discretionary"),
+            new InstrumentUpsertCommand("EAST.CA", "Eastern Company", "Consumer Staples"),
+            new InstrumentUpsertCommand("AMOC.CA", "Alexandria Mineral Oils", "Energy"),
+            new InstrumentUpsertCommand("MFPC.CA", "Misr Fertilizers Production", "Materials"),
+            new InstrumentUpsertCommand("SKPC.CA", "Sidi Kerir Petrochemicals", "Materials"),
+            new InstrumentUpsertCommand("CCAP.CA", "Citadel Capital", "Financial Services"),
+            new InstrumentUpsertCommand("HELI.CA", "Heliopolis Housing", "Real Estate"),
+            new InstrumentUpsertCommand("PACH.CA", "Paint and Chemicals Industries", "Materials"),
+            new InstrumentUpsertCommand("EKHO.CA", "Egypt Kuwait Holding", "Industrials"),
+            new InstrumentUpsertCommand("MICH.CA", "Misr Chemical Industries", "Materials"),
+            new InstrumentUpsertCommand("ALCN.CA", "Alexandria Containers", "Industrials"),
+            new InstrumentUpsertCommand("ESRS.CA", "Ezz Steel", "Materials"),
+            new InstrumentUpsertCommand("JUFO.CA", "Juhayna Food Industries", "Consumer Staples"),
+            new InstrumentUpsertCommand("DOMT.CA", "Domty", "Consumer Staples"),
+            new InstrumentUpsertCommand("GDWA.CA", "Gadwa for Industrial Development", "Financial Services"),
+            new InstrumentUpsertCommand("CIEB.CA", "Credit Agricole Egypt", "Banks"),
+            new InstrumentUpsertCommand("AUTO.CA", "GB Corp", "Consumer Discretionary"),
+            new InstrumentUpsertCommand("BTFH.CA", "Beltone Holding", "Financial Services"),
+            new InstrumentUpsertCommand("OBRI.CA", "Obour Land", "Consumer Staples"),
+            new InstrumentUpsertCommand("RAYA.CA", "Raya Holding", "Technology"),
+            new InstrumentUpsertCommand("CLHO.CA", "Cleopatra Hospitals", "Healthcare")
+    );
 
     private final StockInstrumentRepository stockInstrumentRepository;
     private final SectorReferenceRepository sectorReferenceRepository;
@@ -40,23 +79,43 @@ public class InstrumentSyncService {
     }
 
     public BulkUpsertResult bulkUpsert(List<InstrumentUpsertCommand> commands) {
-        if (commands == null || commands.isEmpty()) {
-            return new BulkUpsertResult(0, 0, 0, 0);
+        List<InstrumentUpsertCommand> payload = commands == null ? List.of() : commands;
+        if (payload.isEmpty()) {
+            return seedFallbackUniverse();
         }
 
         int inserted = 0;
         int updated = 0;
         int skipped = 0;
+        int malformed = 0;
 
         ensureSectorExistsSafely(DEFAULT_SECTOR_CODE, DEFAULT_SECTOR_NAME);
 
-        for (InstrumentUpsertCommand command : commands) {
+        Map<String, InstrumentUpsertCommand> deduplicated = new LinkedHashMap<>();
+        for (InstrumentUpsertCommand command : payload) {
             if (command == null) {
-                skipped++;
+                malformed++;
                 LOGGER.warn("Skipping null instrument command");
                 continue;
             }
 
+            String canonicalSymbol = normalizeSymbol(command.symbol());
+            if (canonicalSymbol == null) {
+                malformed++;
+                continue;
+            }
+
+            deduplicated.put(
+                    canonicalSymbol,
+                    new InstrumentUpsertCommand(
+                            canonicalSymbol,
+                            normalizeName(command.name(), canonicalSymbol),
+                            command.sector()
+                    )
+            );
+        }
+
+        for (InstrumentUpsertCommand command : deduplicated.values()) {
             try {
                 SingleUpsertOutcome outcome = transactionTemplate.execute(status -> upsertSingle(command));
                 if (outcome == null) {
@@ -77,7 +136,75 @@ public class InstrumentSyncService {
             }
         }
 
-        return new BulkUpsertResult(commands.size(), inserted, updated, skipped);
+        if (inserted + updated == 0) {
+            BulkUpsertResult fallback = seedFallbackUniverse();
+            inserted += fallback.inserted();
+            updated += fallback.updated();
+            skipped += fallback.skipped();
+        }
+
+        skipped += malformed;
+        return new BulkUpsertResult(payload.size(), inserted, updated, skipped);
+    }
+
+    public List<InstrumentCatalogItem> listInstrumentCatalog() {
+        Map<String, InstrumentCatalogItem> byCanonicalSymbol = new LinkedHashMap<>();
+
+        for (StockInstrument stock : stockInstrumentRepository.findByIsSuspendedFalse()) {
+            if (stock.getId() == null) {
+                continue;
+            }
+
+            String canonicalSymbol = normalizeSymbol(stock.getSymbol());
+            if (canonicalSymbol == null) {
+                continue;
+            }
+
+            InstrumentCatalogItem current = byCanonicalSymbol.get(canonicalSymbol);
+            if (current == null || stock.getId() < current.instrumentId()) {
+                byCanonicalSymbol.put(
+                        canonicalSymbol,
+                        new InstrumentCatalogItem(
+                                stock.getId(),
+                                canonicalSymbol,
+                                normalizeName(stock.getName(), canonicalSymbol),
+                                stock.getSectorCode()
+                        )
+                );
+            }
+        }
+
+        return byCanonicalSymbol.values()
+                .stream()
+                .sorted(Comparator.comparing(InstrumentCatalogItem::symbol))
+                .toList();
+    }
+
+    private BulkUpsertResult seedFallbackUniverse() {
+        int inserted = 0;
+        int updated = 0;
+        int skipped = 0;
+
+        ensureSectorExistsSafely(DEFAULT_SECTOR_CODE, DEFAULT_SECTOR_NAME);
+
+        for (InstrumentUpsertCommand command : EGX30_FALLBACK) {
+            try {
+                SingleUpsertOutcome outcome = transactionTemplate.execute(status -> upsertSingle(command));
+                if (outcome == null) {
+                    skipped++;
+                    continue;
+                }
+
+                inserted += outcome.inserted();
+                updated += outcome.updated();
+                skipped += outcome.skipped();
+            } catch (RuntimeException ex) {
+                skipped++;
+                LOGGER.warn("Fallback instrument upsert failed for symbol={}", command.symbol(), ex);
+            }
+        }
+
+        return new BulkUpsertResult(EGX30_FALLBACK.size(), inserted, updated, skipped);
     }
 
     private SingleUpsertOutcome upsertSingle(InstrumentUpsertCommand command) {
@@ -89,7 +216,7 @@ public class InstrumentSyncService {
         String name = normalizeName(command.name(), symbol);
         String sectorCode = resolveSectorCode(command.sector());
 
-        StockInstrument existing = stockInstrumentRepository.findBySymbol(symbol).orElse(null);
+        StockInstrument existing = findExistingBySymbolAliases(symbol);
         LocalDateTime now = LocalDateTime.now();
 
         if (existing == null) {
@@ -106,6 +233,10 @@ public class InstrumentSyncService {
             return new SingleUpsertOutcome(1, 0, 0);
         }
 
+        if (!symbol.equals(existing.getSymbol())) {
+            existing.setSymbol(symbol);
+        }
+
         existing.setName(name);
         existing.setSectorCode(sectorCode);
         existing.setIsSuspended(false);
@@ -113,6 +244,24 @@ public class InstrumentSyncService {
         existing.setUpdatedAt(now);
         stockInstrumentRepository.saveAndFlush(existing);
         return new SingleUpsertOutcome(0, 1, 0);
+    }
+
+    private StockInstrument findExistingBySymbolAliases(String canonicalSymbol) {
+        StockInstrument existing = stockInstrumentRepository.findBySymbol(canonicalSymbol).orElse(null);
+        if (existing != null) {
+            return existing;
+        }
+
+        if (!canonicalSymbol.endsWith(EGX_SUFFIX)) {
+            return null;
+        }
+
+        String legacySymbol = canonicalSymbol.substring(0, canonicalSymbol.length() - EGX_SUFFIX.length());
+        if (legacySymbol.isBlank()) {
+            return null;
+        }
+
+        return stockInstrumentRepository.findBySymbol(legacySymbol).orElse(null);
     }
 
     private String resolveSectorCode(String rawSector) {
@@ -176,11 +325,21 @@ public class InstrumentSyncService {
             return null;
         }
 
-        String normalized = rawSymbol.trim().toUpperCase();
+        String normalized = rawSymbol.trim().toUpperCase(Locale.ROOT);
 
         if (normalized.contains(":")) {
             normalized = normalized.substring(normalized.lastIndexOf(':') + 1);
         }
+
+        normalized = normalized.replaceAll("[^A-Z0-9._-]", "");
+        if (normalized.isBlank()) {
+            return null;
+        }
+
+        if (normalized.endsWith(EGX_SUFFIX)) {
+            return truncate(normalized, SYMBOL_MAX_LENGTH);
+        }
+
         if (normalized.contains(".")) {
             normalized = normalized.substring(0, normalized.indexOf('.'));
         }
@@ -190,7 +349,7 @@ public class InstrumentSyncService {
             return null;
         }
 
-        return truncate(normalized, SYMBOL_MAX_LENGTH);
+        return truncate(normalized + EGX_SUFFIX, SYMBOL_MAX_LENGTH);
     }
 
     private String normalizeName(String rawName, String fallbackSymbol) {
@@ -205,17 +364,35 @@ public class InstrumentSyncService {
             return null;
         }
 
-        String normalized = rawSector.trim().toUpperCase();
-        normalized = normalized.replaceAll("[^A-Z0-9]+", "_");
-        normalized = normalized.replaceAll("_+", "_");
-        normalized = normalized.replaceAll("^_+", "");
-        normalized = normalized.replaceAll("_+$", "");
+        String candidate = rawSector.trim().toUpperCase(Locale.ROOT)
+                .replace('.', ' ')
+                .replace('-', ' ')
+                .replace('/', ' ')
+                .replaceAll("\\s+", " ");
 
-        if (normalized.isBlank()) {
-            return null;
-        }
-
-        return truncate(normalized, SECTOR_CODE_MAX_LENGTH);
+        return switch (candidate) {
+            case "BANKS" -> "BANKS";
+            case "FIN SERV", "FIN_SERV", "FINANCIAL SERVICES", "FINANCIAL_SERVICES" -> "FIN_SERV";
+            case "INDUSTRIAL", "INDUSTRIALS" -> "INDUSTRIALS";
+            case "REAL ESTATE", "REAL_ESTATE" -> "REAL_ESTATE";
+            case "TELECOMMUNICATION", "TELECOMMUNICATIONS", "TELECOM" -> "TELECOM";
+            case "ENERGY" -> "ENERGY";
+            case "CONSUMER", "CONSUMER STAPLES", "CONSUMER DISCRETIONARY",
+                 "CONSUMER_NON_CYCLICAL", "CONSUMER_CYCLICAL" -> "CONSUMER";
+            case "HEALTHCARE", "HEALTH CARE" -> "HEALTHCARE";
+            case "MATERIAL", "MATERIALS" -> "MATERIALS";
+            case "TECH", "TECHNOLOGY" -> "TECHNOLOGY";
+            default -> {
+                String normalized = candidate.replaceAll("[^A-Z0-9]+", "_");
+                normalized = normalized.replaceAll("_+", "_");
+                normalized = normalized.replaceAll("^_+", "");
+                normalized = normalized.replaceAll("_+$", "");
+                if (normalized.isBlank()) {
+                    yield null;
+                }
+                yield truncate(normalized, SECTOR_CODE_MAX_LENGTH);
+            }
+        };
     }
 
     private String normalizeSectorName(String rawSector, String normalizedCode) {
@@ -223,7 +400,19 @@ public class InstrumentSyncService {
             return rawSector.trim();
         }
 
-        return normalizedCode.replace('_', ' ');
+        return switch (normalizedCode) {
+            case "BANKS" -> "Banks";
+            case "FIN_SERV" -> "Financial Services";
+            case "INDUSTRIALS" -> "Industrials";
+            case "REAL_ESTATE" -> "Real Estate";
+            case "TELECOM" -> "Telecommunications";
+            case "ENERGY" -> "Energy";
+            case "CONSUMER" -> "Consumer";
+            case "HEALTHCARE" -> "Healthcare";
+            case "MATERIALS" -> "Materials";
+            case "TECHNOLOGY" -> "Technology";
+            default -> normalizedCode.replace('_', ' ');
+        };
     }
 
     private String truncate(String value, int maxLength) {
@@ -242,6 +431,9 @@ public class InstrumentSyncService {
     }
 
     public record BulkUpsertResult(int received, int inserted, int updated, int skipped) {
+    }
+
+    public record InstrumentCatalogItem(Long instrumentId, String symbol, String name, String sectorCode) {
     }
 
     private record SingleUpsertOutcome(int inserted, int updated, int skipped) {

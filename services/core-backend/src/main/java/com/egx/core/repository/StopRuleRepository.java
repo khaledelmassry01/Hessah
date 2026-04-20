@@ -7,4 +7,6 @@ import java.util.List;
 
 public interface StopRuleRepository extends JpaRepository<StopRule, Long> {
     List<StopRule> findByIsActiveTrue();
+
+    List<StopRule> findByUserIdOrderByUpdatedAtDesc(Long userId);
 }

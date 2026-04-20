@@ -1,5 +1,19 @@
 package com.egx.core.controller;
 
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
+
 import com.egx.core.domain.AllocationExecution;
 import com.egx.core.domain.PortfolioRun;
 import com.egx.core.domain.TradeOrder;
@@ -12,20 +26,8 @@ import com.egx.core.repository.PortfolioRunRepository;
 import com.egx.core.repository.TradeOrderRepository;
 import com.egx.core.repository.WalletLedgerEntryRepository;
 import com.egx.core.service.PortfolioService;
-import jakarta.validation.constraints.Positive;
-import org.springframework.http.HttpStatus;
-import org.springframework.security.core.Authentication;
-import org.springframework.validation.annotation.Validated;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
 
-import java.math.BigDecimal;
-import java.util.List;
-import java.util.Map;
+import jakarta.validation.constraints.Positive;
 
 @RestController
 @Validated
@@ -136,12 +138,29 @@ public class PortfolioController {
 
         PortfolioRun run = portfolioRunRepository
             .findFirstByUserIdAndRunStatusOrderByGeneratedAtDescIdDesc(userId, PortfolioRunStatus.COMPLETED)
-            .orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "No completed portfolio found for user: " + userId
-            ));
+            .orElse(null);
+
+        if (run == null) {
+            return emptyPortfolioResponse();
+        }
 
         return mapStoredPortfolio(run, authenticatedUserId);
+    }
+
+    private PortfolioResponse emptyPortfolioResponse() {
+        return new PortfolioResponse(
+                null,
+                "NO_PORTFOLIO",
+                null,
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                null,
+                List.of(),
+                List.of()
+        );
     }
 
     private PortfolioResponse mapStoredPortfolio(PortfolioRun run, Long userId) {

@@ -61,7 +61,7 @@ def run_backtest(payload: BacktestRequest) -> BacktestResponse:
                 RejectedSymbol(symbol=item.symbol, reason=item.reason)
                 for item in constraint_output.rejected_symbols
             ],
-            warnings=warnings + ["No eligible symbols after historical constraints"],
+            warnings=_dedupe_warnings(warnings + ["No eligible symbols after historical constraints"]),
         )
 
     optimization = optimize_max_sharpe(
@@ -162,7 +162,7 @@ def run_backtest(payload: BacktestRequest) -> BacktestResponse:
         expected_volatility=round(float(optimization.expected_volatility), 8),
         historical_allocations=historical_allocations,
         rejected_symbols=rejected_symbols,
-        warnings=warnings,
+        warnings=_dedupe_warnings(warnings),
     )
 
 
@@ -207,6 +207,21 @@ def _add_business_days(base_date: date, business_days: int) -> date:
         if current.weekday() < 5:
             added += 1
     return current
+
+
+def _dedupe_warnings(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+
+    for item in items:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+
+        seen.add(normalized)
+        deduped.append(normalized)
+
+    return deduped
 
 
 def safe_run_backtest(payload: BacktestRequest) -> BacktestResponse:

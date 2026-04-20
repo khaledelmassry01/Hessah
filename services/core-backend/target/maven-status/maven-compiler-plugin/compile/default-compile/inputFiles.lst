@@ -11,6 +11,7 @@ C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\client\Rest
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\config\OpenApiConfig.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\config\RestClientConfig.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\config\SecurityConfig.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\config\SecurityFilterBeansConfig.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\AiPerformanceController.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\AuthController.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\dto\auth\AuthTokensResponse.java
@@ -31,6 +32,7 @@ C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\PortfolioController.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\PremiumController.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\SessionController.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\StopRuleController.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\SubscriptionController.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\UserController.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\controller\WalletController.java

@@ -5,6 +5,7 @@ import logging
 import random
 from dataclasses import dataclass
 from datetime import date
+from functools import lru_cache
 from typing import Any, Callable
 
 import numpy as np
@@ -34,11 +35,11 @@ EGX30_SYMBOLS = [
     "SKPC",
     "CCAP",
     "HELI",
-    "PACH",
+    "ORAS",
     "EKHO",
     "MICH",
     "ALCN",
-    "ESRS",
+    "ORHD",
     "JUFO",
     "DOMT",
     "GDWA",
@@ -71,11 +72,11 @@ DEFAULT_SECTOR_MAP = {
     "EAST": "CONSUMER_CYCLICAL",
     "CCAP": "FINANCIAL_SERVICES",
     "HELI": "REAL_ESTATE",
-    "PACH": "MATERIALS",
+    "ORAS": "INDUSTRIALS",
     "EKHO": "INDUSTRIALS",
     "MICH": "MATERIALS",
     "ALCN": "MATERIALS",
-    "ESRS": "CONSUMER_CYCLICAL",
+    "ORHD": "REAL_ESTATE",
     "JUFO": "CONSUMER_NON_CYCLICAL",
     "DOMT": "CONSUMER_NON_CYCLICAL",
     "GDWA": "INDUSTRIALS",
@@ -101,11 +102,11 @@ DEFAULT_MARKET_CAP_RANK = {
     "SKPC": 14,
     "CCAP": 15,
     "HELI": 16,
-    "PACH": 17,
+    "ORAS": 17,
     "EKHO": 18,
     "MICH": 19,
     "ALCN": 20,
-    "ESRS": 21,
+    "ORHD": 21,
     "JUFO": 22,
     "DOMT": 23,
     "GDWA": 24,
@@ -159,27 +160,34 @@ def load_market_dataset(
     suspended_symbols = _mock_suspended_symbols(as_of_date)
 
     history_by_symbol: dict[str, pd.DataFrame] = {}
-    for symbol in EGX30_SYMBOLS:
-        try:
-            history_by_symbol[symbol] = _fetch_symbol_ohlcv(
-                symbol=symbol,
-                as_of_date=as_of_date,
-                output_bars=n_bars,
-                fetch_bars=max(FETCH_BUFFER_BARS, n_bars),
-            )
-        except Exception as exc:  # noqa: BLE001 - external source behavior can vary
-            warnings.append(f"OHLCV fetch failed for {symbol}: {exc}")
+    ohlcv_loader = _resolve_get_ohlcv_callable()
 
-    if len(history_by_symbol) < 8:
-        warnings.append("egxpy unavailable or insufficient coverage; synthetic fallback activated")
+    if ohlcv_loader is None:
+        warnings.append("egxpy OHLCV loader unavailable; synthetic fallback activated")
         history_by_symbol = _generate_mock_ohlcv(EGX30_SYMBOLS, as_of_date, n_bars)
     else:
-        missing_symbols = [symbol for symbol in EGX30_SYMBOLS if symbol not in history_by_symbol]
-        if missing_symbols:
-            history_by_symbol.update(_generate_mock_ohlcv(missing_symbols, as_of_date, n_bars))
-            warnings.append(
-                "Partial data coverage; synthetic fallback used for: " + ", ".join(missing_symbols)
-            )
+        for symbol in EGX30_SYMBOLS:
+            try:
+                history_by_symbol[symbol] = _fetch_symbol_ohlcv(
+                    symbol=symbol,
+                    as_of_date=as_of_date,
+                    output_bars=n_bars,
+                    fetch_bars=max(FETCH_BUFFER_BARS, n_bars),
+                    get_ohlcv_data=ohlcv_loader,
+                )
+            except Exception as exc:  # noqa: BLE001 - external source behavior can vary
+                warnings.append(f"OHLCV fetch failed for {symbol}: {exc}")
+
+        if len(history_by_symbol) < 8:
+            warnings.append("egxpy unavailable or insufficient coverage; synthetic fallback activated")
+            history_by_symbol = _generate_mock_ohlcv(EGX30_SYMBOLS, as_of_date, n_bars)
+        else:
+            missing_symbols = [symbol for symbol in EGX30_SYMBOLS if symbol not in history_by_symbol]
+            if missing_symbols:
+                history_by_symbol.update(_generate_mock_ohlcv(missing_symbols, as_of_date, n_bars))
+                warnings.append(
+                    "Partial data coverage; synthetic fallback used for: " + ", ".join(missing_symbols)
+                )
 
     prices, volumes = _build_price_volume_frames(history_by_symbol)
     returns = prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
@@ -240,30 +248,37 @@ def build_historical_market_data_payload(
     warnings: list[str] = []
     source = "live-provider"
     history_by_symbol: dict[str, pd.DataFrame] = {}
+    ohlcv_loader = _resolve_get_ohlcv_callable()
 
-    for symbol in EGX30_SYMBOLS:
-        try:
-            history_by_symbol[symbol] = _fetch_symbol_ohlcv(
-                symbol=symbol,
-                as_of_date=end_date,
-                output_bars=output_bars,
-                fetch_bars=max(FETCH_BUFFER_BARS, output_bars + 64),
-            )
-        except Exception as exc:  # noqa: BLE001 - external source behavior can vary
-            warnings.append(f"OHLCV fetch failed for {symbol}: {exc}")
-
-    if len(history_by_symbol) < 8:
+    if ohlcv_loader is None:
         source = "fallback-synthetic"
-        warnings.append("egxpy unavailable or insufficient coverage; synthetic historical payload activated")
+        warnings.append("egxpy OHLCV loader unavailable; synthetic historical payload activated")
         history_by_symbol = _generate_mock_ohlcv(EGX30_SYMBOLS, end_date, output_bars)
     else:
-        missing_symbols = [symbol for symbol in EGX30_SYMBOLS if symbol not in history_by_symbol]
-        if missing_symbols:
-            source = "hybrid-live-synthetic"
-            history_by_symbol.update(_generate_mock_ohlcv(missing_symbols, end_date, output_bars))
-            warnings.append(
-                "Partial historical coverage; synthetic fallback used for: " + ", ".join(missing_symbols)
-            )
+        for symbol in EGX30_SYMBOLS:
+            try:
+                history_by_symbol[symbol] = _fetch_symbol_ohlcv(
+                    symbol=symbol,
+                    as_of_date=end_date,
+                    output_bars=output_bars,
+                    fetch_bars=max(FETCH_BUFFER_BARS, output_bars + 64),
+                    get_ohlcv_data=ohlcv_loader,
+                )
+            except Exception as exc:  # noqa: BLE001 - external source behavior can vary
+                warnings.append(f"OHLCV fetch failed for {symbol}: {exc}")
+
+        if len(history_by_symbol) < 8:
+            source = "fallback-synthetic"
+            warnings.append("egxpy unavailable or insufficient coverage; synthetic historical payload activated")
+            history_by_symbol = _generate_mock_ohlcv(EGX30_SYMBOLS, end_date, output_bars)
+        else:
+            missing_symbols = [symbol for symbol in EGX30_SYMBOLS if symbol not in history_by_symbol]
+            if missing_symbols:
+                source = "hybrid-live-synthetic"
+                history_by_symbol.update(_generate_mock_ohlcv(missing_symbols, end_date, output_bars))
+                warnings.append(
+                    "Partial historical coverage; synthetic fallback used for: " + ", ".join(missing_symbols)
+                )
 
     payload: list[dict[str, Any]] = []
     for symbol, frame in sorted(history_by_symbol.items(), key=lambda item: item[0]):
@@ -301,13 +316,14 @@ def _fetch_symbol_ohlcv(
     as_of_date: date,
     output_bars: int,
     fetch_bars: int,
+    get_ohlcv_data: Callable[..., Any] | None = None,
 ) -> pd.DataFrame:
-    get_ohlcv_data = _resolve_get_ohlcv_callable()
-    if get_ohlcv_data is None:
+    resolved_loader = get_ohlcv_data or _resolve_get_ohlcv_callable()
+    if resolved_loader is None:
         raise DataPipelineError("get_OHLCV_data not importable from egxpy")
 
     # Required integration call shape from API reference.
-    raw = get_ohlcv_data(symbol, EGX_EXCHANGE, EGX_INTERVAL, fetch_bars)
+    raw = resolved_loader(symbol, EGX_EXCHANGE, EGX_INTERVAL, fetch_bars)
     normalized = _normalize_ohlcv_frame(raw)
 
     if isinstance(normalized.index, pd.DatetimeIndex):
@@ -321,8 +337,10 @@ def _fetch_symbol_ohlcv(
     return historical.tail(output_bars)
 
 
+@lru_cache(maxsize=1)
 def _resolve_get_ohlcv_callable() -> Callable[..., Any] | None:
-    module_candidates = ["egxpy", "egxpy.api", "egxpy.client"]
+    module_candidates = ["egxpy", "egxpy.download", "egxpy.api", "egxpy.client"]
+    callable_candidates = ["get_OHLCV_data", "get_ohlcv_data"]
 
     for module_name in module_candidates:
         try:
@@ -330,9 +348,10 @@ def _resolve_get_ohlcv_callable() -> Callable[..., Any] | None:
         except Exception:  # noqa: BLE001
             continue
 
-        candidate = getattr(module, "get_OHLCV_data", None)
-        if callable(candidate):
-            return candidate
+        for callable_name in callable_candidates:
+            candidate = getattr(module, callable_name, None)
+            if callable(candidate):
+                return candidate
 
     return None
 

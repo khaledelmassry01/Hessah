@@ -23,9 +23,12 @@ from .data_pipeline import DEFAULT_SECTOR_MAP, EGX30_SYMBOLS
 LOGGER = logging.getLogger(__name__)
 DEFAULT_CORE_BACKEND_URL = "http://core-backend:8081"
 DEFAULT_CORE_BULK_PATH = "/api/core/instruments/bulk"
+DEFAULT_CORE_CATALOG_PATH = "/api/core/instruments/ids"
 DEFAULT_SECTOR = "Financial Services"
 DEFAULT_SEED_CSV_FILE = Path(__file__).resolve().parent / "data" / "egx30_snapshot.csv"
 YAHOO_SUFFIX = ".CA"
+SYMBOL_MAX_LENGTH = 16
+CORE_CATALOG_CACHE_TTL_SECONDS = float(os.getenv("CORE_CATALOG_CACHE_TTL_SECONDS", "300"))
 YAHOO_MIN_DELAY_SECONDS = 2.0
 YAHOO_MAX_DELAY_SECONDS = 5.0
 YAHOO_RATE_LIMIT_BACKOFF_SECONDS = 5.0
@@ -67,6 +70,16 @@ EGX30_FALLBACK_METADATA: dict[str, dict[str, str]] = {
     "OBRI": {"name": "Obour Land", "sector": "Consumer Staples"},
     "RAYA": {"name": "Raya Holding", "sector": "Technology"},
     "CLHO": {"name": "Cleopatra Hospitals", "sector": "Healthcare"},
+}
+
+for _base_symbol, _metadata in list(EGX30_FALLBACK_METADATA.items()):
+    EGX30_FALLBACK_METADATA[f"{_base_symbol}{YAHOO_SUFFIX}"] = _metadata
+
+
+_core_catalog_cache: dict[str, Any] = {
+    "catalogUrl": "",
+    "fetchedAt": 0.0,
+    "items": [],
 }
 
 SECTOR_CODE_TO_NAME = {
@@ -121,6 +134,76 @@ def sync_live_instruments_to_core() -> dict[str, Any]:
     }
 
 
+def fetch_core_instrument_catalog(force_refresh: bool = False) -> dict[str, Any]:
+    core_base_url = os.getenv("CORE_BACKEND_URL", DEFAULT_CORE_BACKEND_URL).rstrip("/")
+    catalog_url = f"{core_base_url}{DEFAULT_CORE_CATALOG_PATH}"
+
+    now = time.time()
+    cached_items = _core_catalog_cache.get("items")
+    cached_at = float(_core_catalog_cache.get("fetchedAt") or 0.0)
+    cached_url = _core_catalog_cache.get("catalogUrl")
+
+    if (
+        not force_refresh
+        and isinstance(cached_items, list)
+        and cached_items
+        and cached_url == catalog_url
+        and (now - cached_at) < CORE_CATALOG_CACHE_TTL_SECONDS
+    ):
+        return {
+            "catalogUrl": catalog_url,
+            "cached": True,
+            "instrumentCount": len(cached_items),
+            "items": list(cached_items),
+        }
+
+    status_code, payload = _get_json(catalog_url)
+    if not isinstance(payload, list):
+        raise RuntimeError("Core instrument catalog must return a JSON array")
+
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for raw_item in payload:
+        if not isinstance(raw_item, dict):
+            continue
+
+        symbol = _normalize_symbol(str(raw_item.get("symbol") or ""))
+        instrument_id = _coerce_positive_int(
+            raw_item.get("instrumentId")
+            or raw_item.get("instrument_id")
+            or raw_item.get("id")
+        )
+
+        if symbol is None or instrument_id is None:
+            continue
+
+        candidate = {
+            "instrumentId": instrument_id,
+            "symbol": symbol,
+            "name": str(raw_item.get("name") or symbol)[:255],
+            "sectorCode": str(raw_item.get("sectorCode") or raw_item.get("sector_code") or "")[:64],
+        }
+
+        existing = by_symbol.get(symbol)
+        if existing is None or candidate["instrumentId"] < existing["instrumentId"]:
+            by_symbol[symbol] = candidate
+
+    normalized_items = sorted(by_symbol.values(), key=lambda item: item["symbol"])
+    if not normalized_items:
+        raise RuntimeError("Core instrument catalog returned no valid instrument entries")
+
+    _core_catalog_cache["catalogUrl"] = catalog_url
+    _core_catalog_cache["fetchedAt"] = time.time()
+    _core_catalog_cache["items"] = normalized_items
+
+    return {
+        "catalogUrl": catalog_url,
+        "cached": False,
+        "statusCode": status_code,
+        "instrumentCount": len(normalized_items),
+        "items": list(normalized_items),
+    }
+
+
 def fetch_active_exchange_instruments() -> tuple[list[ExchangeInstrument], str, list[str]]:
     warnings: list[str] = []
 
@@ -142,19 +225,27 @@ def _discover_with_yfinance(warnings: list[str]) -> list[ExchangeInstrument]:
     discovered: dict[str, ExchangeInstrument] = {}
 
     for symbol in EGX30_SYMBOLS:
-        ticker = _to_yahoo_ticker(symbol)
-        LOGGER.info("Fetching Yahoo instrument probe for symbol=%s ticker=%s", symbol, ticker)
+        canonical_symbol = _normalize_symbol(symbol)
+        if canonical_symbol is None:
+            continue
 
-        available, warning = _probe_ticker_with_retry(symbol=symbol, ticker=ticker, session=session)
+        ticker = _to_yahoo_ticker(canonical_symbol)
+        LOGGER.info("Fetching Yahoo instrument probe for symbol=%s ticker=%s", canonical_symbol, ticker)
+
+        available, warning = _probe_ticker_with_retry(symbol=canonical_symbol, ticker=ticker, session=session)
         if warning:
             warnings.append(warning)
 
         if available:
-            metadata = seed_metadata.get(symbol, {})
-            discovered[symbol] = ExchangeInstrument(
-                symbol=symbol,
-                name=str(metadata.get("name") or EGX30_FALLBACK_METADATA.get(symbol, {}).get("name") or symbol)[:255],
-                sector=_resolve_sector_name(symbol, str(metadata.get("sector") or "")),
+            metadata = seed_metadata.get(canonical_symbol, {})
+            discovered[canonical_symbol] = ExchangeInstrument(
+                symbol=canonical_symbol,
+                name=str(
+                    metadata.get("name")
+                    or EGX30_FALLBACK_METADATA.get(canonical_symbol, {}).get("name")
+                    or canonical_symbol
+                )[:255],
+                sector=_resolve_sector_name(canonical_symbol, str(metadata.get("sector") or "")),
             )
 
         _sleep_randomized_fetch_delay()
@@ -419,6 +510,15 @@ def _raw_to_rows(raw: Any) -> list[Any]:
 
 
 def _normalize_symbol(raw: str | None) -> str | None:
+    base_symbol = _base_symbol(raw)
+    if base_symbol is None:
+        return None
+
+    canonical = f"{base_symbol}{YAHOO_SUFFIX}"
+    return canonical[:SYMBOL_MAX_LENGTH]
+
+
+def _base_symbol(raw: str | None) -> str | None:
     if raw is None:
         return None
 
@@ -428,6 +528,8 @@ def _normalize_symbol(raw: str | None) -> str | None:
 
     if ":" in symbol:
         symbol = symbol.split(":")[-1]
+    if symbol.endswith(YAHOO_SUFFIX):
+        symbol = symbol[: -len(YAHOO_SUFFIX)]
     if "." in symbol:
         symbol = symbol.split(".")[0]
 
@@ -435,7 +537,7 @@ def _normalize_symbol(raw: str | None) -> str | None:
     if not symbol:
         return None
 
-    return symbol[:16]
+    return symbol[:SYMBOL_MAX_LENGTH]
 
 
 def _first_non_blank(row: dict[str, Any], *keys: str) -> str | None:
@@ -449,18 +551,26 @@ def _first_non_blank(row: dict[str, Any], *keys: str) -> str | None:
 def _fallback_instruments(warnings: list[str]) -> list[ExchangeInstrument]:
     seed_metadata = _load_seed_metadata(warnings)
 
-    return [
-        ExchangeInstrument(
-            symbol=symbol,
-            name=str(
-                seed_metadata.get(symbol, {}).get("name")
-                or EGX30_FALLBACK_METADATA.get(symbol, {}).get("name")
-                or symbol
-            )[:255],
-            sector=_resolve_sector_name(symbol, str(seed_metadata.get(symbol, {}).get("sector") or "")),
+    fallback: list[ExchangeInstrument] = []
+    for symbol in EGX30_SYMBOLS:
+        canonical_symbol = _normalize_symbol(symbol)
+        if canonical_symbol is None:
+            continue
+
+        metadata = seed_metadata.get(canonical_symbol, {})
+        fallback.append(
+            ExchangeInstrument(
+                symbol=canonical_symbol,
+                name=str(
+                    metadata.get("name")
+                    or EGX30_FALLBACK_METADATA.get(canonical_symbol, {}).get("name")
+                    or canonical_symbol
+                )[:255],
+                sector=_resolve_sector_name(canonical_symbol, str(metadata.get("sector") or "")),
+            )
         )
-        for symbol in EGX30_SYMBOLS
-    ]
+
+    return fallback
 
 
 def _resolve_sector_name(symbol: str, raw_sector: str | None) -> str:
@@ -473,7 +583,8 @@ def _resolve_sector_name(symbol: str, raw_sector: str | None) -> str:
     if metadata_sector:
         return metadata_sector[:64]
 
-    mapped_code = DEFAULT_SECTOR_MAP.get(symbol)
+    base_symbol = _base_symbol(symbol)
+    mapped_code = DEFAULT_SECTOR_MAP.get(base_symbol) if base_symbol else None
     if mapped_code:
         resolved = SECTOR_CODE_TO_NAME.get(mapped_code.upper(), mapped_code.replace("_", " ").title())
         return resolved[:64]
@@ -482,7 +593,9 @@ def _resolve_sector_name(symbol: str, raw_sector: str | None) -> str:
 
 
 def _to_yahoo_ticker(symbol: str) -> str:
-    normalized = symbol.strip().upper()
+    normalized = _normalize_symbol(symbol)
+    if normalized is None:
+        normalized = symbol.strip().upper()
     if normalized.endswith(YAHOO_SUFFIX):
         return normalized
     return f"{normalized}{YAHOO_SUFFIX}"
@@ -528,7 +641,7 @@ def _load_seed_metadata(warnings: list[str]) -> dict[str, dict[str, str]]:
         with DEFAULT_SEED_CSV_FILE.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                symbol = (row.get("symbol") or "").strip().upper()
+                symbol = _normalize_symbol(row.get("symbol"))
                 if not symbol:
                     continue
 
@@ -543,6 +656,42 @@ def _load_seed_metadata(warnings: list[str]) -> dict[str, dict[str, str]]:
         return {}
 
     return metadata
+
+
+def _coerce_positive_int(raw: Any) -> int | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return None
+
+    if parsed <= 0:
+        return None
+
+    return parsed
+
+
+def _get_json(url: str) -> tuple[int, Any]:
+    req = url_request.Request(
+        url=url,
+        method="GET",
+        headers={
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with url_request.urlopen(req, timeout=20) as response:
+            raw_response = response.read().decode("utf-8", errors="replace")
+            parsed = _safe_parse_json(raw_response)
+            return response.getcode(), parsed
+    except url_error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Core catalog fetch failed with HTTP {exc.code}: {body}") from exc
+    except url_error.URLError as exc:
+        raise RuntimeError(f"Core catalog fetch transport failure: {exc}") from exc
 
 
 def _post_json(url: str, payload: Any) -> tuple[int, Any]:

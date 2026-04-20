@@ -30,7 +30,12 @@ import {
   mapApiError,
 } from "@/lib/api";
 import { formatCurrencyEGP } from "@/lib/format";
-import type { GeneratePortfolioPayload, InstrumentSummary, RiskLevel } from "@/types/api";
+import type {
+  GeneratePortfolioPayload,
+  InstrumentSummary,
+  PortfolioAllocation,
+  RiskLevel,
+} from "@/types/api";
 
 const optimizerSchema = z.object({
   budget: z.coerce
@@ -293,6 +298,17 @@ export function OptimizerPage() {
 
   const hasPreview = executionPlanRows.length > 0;
 
+  const chartAllocations = useMemo<PortfolioAllocation[]>(
+    () =>
+      executionPlanRows.map((row) => ({
+        symbol: row.symbol,
+        name: row.instrumentName,
+        executedAmountEgp: row.totalAllocationEgp,
+        targetAmountEgp: row.totalAllocationEgp,
+      })),
+    [executionPlanRows],
+  );
+
   function toggleSector(sector: string) {
     setSelectedSectors((current) => {
       if (current.includes(sector)) {
@@ -446,7 +462,7 @@ export function OptimizerPage() {
       ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[1.1fr_1.9fr]">
-        <AllocationPieChart allocations={previewMutation.data?.allocations ?? []} title="Allocation Preview" />
+        <AllocationPieChart allocations={chartAllocations} title="Allocation Preview" />
 
         <Card className="border-cyan-500/20 bg-slate-950/80 text-slate-100">
           <CardHeader>

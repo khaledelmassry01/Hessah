@@ -1,20 +1,21 @@
 package com.egx.core.security;
 
-import jakarta.servlet.http.Cookie;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import java.time.Duration;
+import java.time.Instant;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
-import java.time.Instant;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 @Service
 public class AuthCookieService {
 
-    private static final String SAME_SITE_STRICT = "Strict";
+    private static final String SAME_SITE_LAX = "Lax";
 
     private final boolean secureCookies;
     private final String accessCookieName;
@@ -74,7 +75,7 @@ public class AuthCookieService {
         return ResponseCookie.from(cookieName, value)
                 .httpOnly(true)
                 .secure(secureCookies)
-                .sameSite(SAME_SITE_STRICT)
+                .sameSite(SAME_SITE_LAX)
                 .path("/")
                 .maxAge(maxAge)
                 .build();

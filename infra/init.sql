@@ -611,3 +611,114 @@ CREATE INDEX ix_security_audit_logs_user_created
 
 CREATE INDEX ix_security_audit_logs_action_created
     ON security_audit_logs (action, created_at);
+
+-- -----------------------------------------------------------------------------
+-- Static test bootstrap for local integration
+-- -----------------------------------------------------------------------------
+
+INSERT INTO users (
+    id,
+    public_uuid,
+    email,
+    password_hash,
+    full_name,
+    phone,
+    kyc_status,
+    account_status,
+    created_at,
+    updated_at
+) VALUES
+(
+    1,
+    '00000000-0000-0000-0000-000000000001',
+    'integration-user@egx.local',
+    '$2a$10$7Q2vM9jC6p6zWxM8h1T7R.u0V7bR1qFv3m2l8d9kP4s6Y1w3u5h7e',
+    'Integration Test User',
+    NULL,
+    'APPROVED',
+    'ACTIVE',
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
+),
+(
+    2,
+    '00000000-0000-0000-0000-000000000002',
+    'integration-user-2@egx.local',
+    '$2a$10$7Q2vM9jC6p6zWxM8h1T7R.u0V7bR1qFv3m2l8d9kP4s6Y1w3u5h7e',
+    'Integration Test User 2',
+    NULL,
+    'APPROVED',
+    'ACTIVE',
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
+)
+ON DUPLICATE KEY UPDATE
+    full_name = VALUES(full_name),
+    kyc_status = 'APPROVED',
+    account_status = 'ACTIVE',
+    updated_at = CURRENT_TIMESTAMP(6);
+
+INSERT INTO wallets (
+    user_id,
+    currency,
+    available_balance,
+    locked_balance,
+    version,
+    created_at,
+    updated_at
+) VALUES
+(
+    1,
+    'EGP',
+    1000000.0000,
+    0.0000,
+    0,
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
+),
+(
+    2,
+    'EGP',
+    1000000.0000,
+    0.0000,
+    0,
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
+)
+ON DUPLICATE KEY UPDATE
+    currency = 'EGP',
+    available_balance = 1000000.0000,
+    updated_at = CURRENT_TIMESTAMP(6);
+
+DELETE FROM subscriptions WHERE user_id IN (1, 2);
+
+INSERT INTO subscriptions (
+    user_id,
+    tier,
+    status,
+    started_at,
+    ends_at,
+    provider_ref,
+    created_at,
+    updated_at
+) VALUES
+(
+    1,
+    'PREMIUM',
+    'ACTIVE',
+    CURRENT_TIMESTAMP(6),
+    NULL,
+    'STATIC_SEED_PREMIUM_1',
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
+),
+(
+    2,
+    'PREMIUM',
+    'ACTIVE',
+    CURRENT_TIMESTAMP(6),
+    NULL,
+    'STATIC_SEED_PREMIUM_2',
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
+);

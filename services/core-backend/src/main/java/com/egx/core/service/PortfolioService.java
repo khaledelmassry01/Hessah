@@ -1,5 +1,19 @@
 package com.egx.core.service;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
 import com.egx.core.client.AiClient;
 import com.egx.core.client.dto.AiAllocationItem;
 import com.egx.core.client.dto.AiConstraintsPayload;
@@ -11,6 +25,7 @@ import com.egx.core.domain.PortfolioRun;
 import com.egx.core.domain.PortfolioTarget;
 import com.egx.core.domain.StockInstrument;
 import com.egx.core.domain.TradeOrder;
+import com.egx.core.domain.Wallet;
 import com.egx.core.domain.enums.PortfolioRunStatus;
 import com.egx.core.domain.enums.RiskLevel;
 import com.egx.core.domain.enums.SubscriptionStatus;
@@ -24,26 +39,17 @@ import com.egx.core.repository.StockInstrumentRepository;
 import com.egx.core.repository.SubscriptionRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 
 @Service
 public class PortfolioService {
 
     private static final int CURRENCY_SCALE = 4;
     private static final int WEIGHT_SCALE = 8;
+    private static final int SYMBOL_MAX_LENGTH = 16;
+    private static final String EGX_SUFFIX = ".CA";
     private static final String DEFAULT_SECTOR_CODE = "FIN_SERV";
     private static final BigDecimal FALLBACK_LAST_PRICE = new BigDecimal("1.0000");
+    private static final BigDecimal FEE_MULTIPLIER = new BigDecimal("0.995");
 
     private final WalletService walletService;
     private final SubscriptionRepository subscriptionRepository;
@@ -99,14 +105,35 @@ public class PortfolioService {
             portfolioRun.setRequestUuid(UUID.randomUUID().toString());
             portfolioRun.setUserId(userId);
             portfolioRun.setRiskLevel(riskLevel);
-            portfolioRun.setRequestedAmountEgp(money(requestedAmount));
+            BigDecimal normalizedRequestedAmount = money(requestedAmount);
+            portfolioRun.setRequestedAmountEgp(normalizedRequestedAmount);
             portfolioRun.setFeeBufferRate(new BigDecimal("0.00500"));
             portfolioRun.setInvestableBudgetEgp(BigDecimal.ZERO.setScale(CURRENCY_SCALE, RoundingMode.HALF_DOWN));
             portfolioRun.setRunStatus(PortfolioRunStatus.PENDING);
             portfolioRun.setGeneratedAt(LocalDateTime.now());
             portfolioRun = portfolioRunRepository.save(portfolioRun);
 
-            WalletService.FeeBufferDeduction fee = walletService.deductFeeBuffer(userId, requestedAmount, portfolioRun.getId());
+            Wallet wallet = walletService.getWalletByUserId(userId);
+            BigDecimal availableBalance = wallet.getAvailableBalance() == null
+                    ? BigDecimal.ZERO
+                    : wallet.getAvailableBalance();
+
+            boolean usingVirtualTestingBalance = availableBalance.compareTo(normalizedRequestedAmount) < 0;
+            WalletService.FeeBufferDeduction fee;
+
+            if (usingVirtualTestingBalance) {
+                BigDecimal virtualRequestedAmount = normalizedRequestedAmount;
+                BigDecimal virtualInvestableBudget = money(virtualRequestedAmount.multiply(FEE_MULTIPLIER));
+                BigDecimal virtualFeeAmount = money(virtualRequestedAmount.subtract(virtualInvestableBudget));
+                fee = new WalletService.FeeBufferDeduction(
+                        virtualRequestedAmount,
+                        virtualInvestableBudget,
+                        virtualFeeAmount
+                );
+            } else {
+                fee = walletService.deductFeeBuffer(userId, normalizedRequestedAmount, portfolioRun.getId());
+            }
+
             portfolioRun.setInvestableBudgetEgp(fee.investableBudget());
 
             AiPredictionRequest aiRequest = buildAiRequest(portfolioRun, tier);
@@ -117,7 +144,9 @@ public class PortfolioService {
             if ("FAILED".equals(aiStatus)) {
                 portfolioRun.setRunStatus(PortfolioRunStatus.FAILED);
                 portfolioRunRepository.save(portfolioRun);
-                walletService.creditResidual(userId, fee.investableBudget(), portfolioRun.getId());
+                if (!usingVirtualTestingBalance) {
+                    walletService.creditResidual(userId, fee.investableBudget(), portfolioRun.getId());
+                }
                 throw new AiIntegrationException("AI engine returned FAILED status for request " + portfolioRun.getRequestUuid());
             }
 
@@ -148,6 +177,7 @@ public class PortfolioService {
             successDetails.put("riskLevel", riskLevel == null ? null : riskLevel.name());
             successDetails.put("requestedAmountEgp", requestedAmount);
             successDetails.put("status", portfolioRun.getRunStatus().name());
+            successDetails.put("usedVirtualTestingBalance", usingVirtualTestingBalance);
             securityAuditService.log("PORTFOLIO_GENERATION", userId, "SUCCESS", successDetails);
 
             return new PortfolioExecutionResult(
@@ -228,9 +258,7 @@ public class PortfolioService {
                 continue;
             }
 
-            StockInstrument stock = stockInstrumentRepository
-                    .findBySymbol(item.getSymbol())
-                    .orElseGet(() -> autoRegisterInstrument(item.getSymbol()));
+            StockInstrument stock = resolveInstrumentForAllocation(item.getSymbol());
 
             if (stock.getLastPrice() == null || stock.getLastPrice().compareTo(BigDecimal.ZERO) <= 0) {
                 stock.setLastPrice(FALLBACK_LAST_PRICE);
@@ -283,16 +311,22 @@ public class PortfolioService {
     }
 
     private StockInstrument autoRegisterInstrument(String symbol) {
-        if (symbol == null || symbol.isBlank()) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        if (normalizedSymbol == null) {
             throw new IllegalStateException("AI response contains a blank symbol");
         }
 
-        String normalizedSymbol = symbol.trim().toUpperCase();
-        if (normalizedSymbol.length() > 16) {
-            normalizedSymbol = normalizedSymbol.substring(0, 16);
-        }
-
         final String symbolKey = normalizedSymbol;
+
+        StockInstrument existing = findBySymbolAliases(symbolKey);
+        if (existing != null) {
+            if (!symbolKey.equals(existing.getSymbol())) {
+                existing.setSymbol(symbolKey);
+                existing.setUpdatedAt(LocalDateTime.now());
+                return stockInstrumentRepository.save(existing);
+            }
+            return existing;
+        }
 
         return stockInstrumentRepository.findBySymbol(symbolKey)
                 .orElseGet(() -> {
@@ -308,6 +342,76 @@ public class PortfolioService {
 
                     return stockInstrumentRepository.save(synthetic);
                 });
+    }
+
+    private StockInstrument resolveInstrumentForAllocation(String symbol) {
+        String canonicalSymbol = normalizeSymbol(symbol);
+        if (canonicalSymbol == null) {
+            throw new IllegalStateException("AI response contains a blank symbol");
+        }
+
+        StockInstrument stock = findBySymbolAliases(canonicalSymbol);
+        if (stock == null) {
+            return autoRegisterInstrument(canonicalSymbol);
+        }
+
+        if (!canonicalSymbol.equals(stock.getSymbol())) {
+            stock.setSymbol(canonicalSymbol);
+            stock.setUpdatedAt(LocalDateTime.now());
+            stock = stockInstrumentRepository.save(stock);
+        }
+
+        return stock;
+    }
+
+    private StockInstrument findBySymbolAliases(String canonicalSymbol) {
+        StockInstrument stock = stockInstrumentRepository.findBySymbol(canonicalSymbol).orElse(null);
+        if (stock != null) {
+            return stock;
+        }
+
+        if (!canonicalSymbol.endsWith(EGX_SUFFIX) || canonicalSymbol.length() <= EGX_SUFFIX.length()) {
+            return null;
+        }
+
+        String legacySymbol = canonicalSymbol.substring(0, canonicalSymbol.length() - EGX_SUFFIX.length());
+        return stockInstrumentRepository.findBySymbol(legacySymbol).orElse(null);
+    }
+
+    private String normalizeSymbol(String symbol) {
+        if (symbol == null || symbol.isBlank()) {
+            return null;
+        }
+
+        String normalized = symbol.trim().toUpperCase(Locale.ROOT);
+        if (normalized.contains(":")) {
+            normalized = normalized.substring(normalized.lastIndexOf(':') + 1);
+        }
+
+        normalized = normalized.replaceAll("[^A-Z0-9._-]", "");
+        if (normalized.isBlank()) {
+            return null;
+        }
+
+        if (normalized.endsWith(EGX_SUFFIX)) {
+            return normalized.length() <= SYMBOL_MAX_LENGTH
+                    ? normalized
+                    : normalized.substring(0, SYMBOL_MAX_LENGTH);
+        }
+
+        if (normalized.contains(".")) {
+            normalized = normalized.substring(0, normalized.indexOf('.'));
+        }
+
+        normalized = normalized.replaceAll("[^A-Z0-9_-]", "");
+        if (normalized.isBlank()) {
+            return null;
+        }
+
+        String canonical = normalized + EGX_SUFFIX;
+        return canonical.length() <= SYMBOL_MAX_LENGTH
+                ? canonical
+                : canonical.substring(0, SYMBOL_MAX_LENGTH);
     }
 
     public record PortfolioExecutionResult(

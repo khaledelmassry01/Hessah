@@ -22,6 +22,7 @@ com\egx\core\client\dto\AiBacktestRequest.class
 com\egx\core\domain\PortfolioRun.class
 com\egx\core\controller\SubscriptionController$SubscriptionActivationResponse.class
 com\egx\core\domain\enums\SubscriptionStatus.class
+com\egx\core\config\SecurityFilterBeansConfig.class
 com\egx\core\service\UserService$ProfileUpdateCommand.class
 com\egx\core\controller\WalletController$WalletResponse.class
 com\egx\core\domain\enums\AccountStatus.class
@@ -46,6 +47,7 @@ com\egx\core\domain\UserSession.class
 com\egx\core\service\OrderService.class
 com\egx\core\controller\WalletController$WalletFundResponse.class
 com\egx\core\controller\AuthController.class
+com\egx\core\controller\InstrumentController$InstrumentCatalogItemResponse.class
 com\egx\core\domain\enums\StopTriggerType.class
 com\egx\core\repository\AiPredictionAuditRepository.class
 com\egx\core\repository\StopRuleRepository.class
@@ -107,6 +109,7 @@ com\egx\core\domain\enums\IngestionStatus.class
 com\egx\core\client\dto\AiPredictionRequest.class
 com\egx\core\controller\SubscriptionController.class
 com\egx\core\service\SessionService$SessionView.class
+com\egx\core\controller\StopRuleController.class
 com\egx\core\domain\enums\RiskLevel.class
 com\egx\core\domain\RebalancePolicy.class
 com\egx\core\domain\BacktestJob.class
@@ -127,6 +130,7 @@ com\egx\core\client\RestAiClient.class
 com\egx\core\service\AllocationService$1.class
 com\egx\core\domain\StopAlert.class
 com\egx\core\service\PremiumAccessService.class
+com\egx\core\service\InstrumentSyncService$InstrumentCatalogItem.class
 com\egx\core\controller\PortfolioController$OrderResponse.class
 com\egx\core\exception\InsufficientWalletBalanceException.class
 com\egx\core\service\PortfolioService.class

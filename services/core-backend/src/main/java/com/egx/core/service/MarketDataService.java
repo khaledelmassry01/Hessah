@@ -1,13 +1,5 @@
 package com.egx.core.service;
 
-import com.egx.core.domain.MarketDailyBar;
-import com.egx.core.domain.StockInstrument;
-import com.egx.core.repository.MarketDailyBarRepository;
-import com.egx.core.repository.StockInstrumentRepository;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
-
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
@@ -16,14 +8,25 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import com.egx.core.domain.MarketDailyBar;
+import com.egx.core.domain.StockInstrument;
+import com.egx.core.repository.MarketDailyBarRepository;
+import com.egx.core.repository.StockInstrumentRepository;
 
 @Service
 public class MarketDataService {
 
     private static final int SYMBOL_MAX_LENGTH = 16;
     private static final int DB_TRANSACTION_BATCH_SIZE = 1000;
+    private static final String EGX_SUFFIX = ".CA";
 
     private final StockInstrumentRepository stockInstrumentRepository;
     private final MarketDailyBarRepository marketDailyBarRepository;
@@ -99,10 +102,25 @@ public class MarketDataService {
             return new BulkUpsertResult(chunk.size(), 0, 0, skipped, 0);
         }
 
-        Map<String, StockInstrument> stockBySymbol = stockInstrumentRepository
-                .findBySymbolIn(new ArrayList<>(bySymbol.keySet()))
-                .stream()
-                .collect(Collectors.toMap(StockInstrument::getSymbol, stock -> stock, (left, right) -> left));
+        List<String> lookupSymbols = new ArrayList<>(bySymbol.keySet());
+        for (String symbol : bySymbol.keySet()) {
+            if (symbol.endsWith(EGX_SUFFIX) && symbol.length() > EGX_SUFFIX.length()) {
+                lookupSymbols.add(symbol.substring(0, symbol.length() - EGX_SUFFIX.length()));
+            }
+        }
+
+        Map<String, StockInstrument> stockBySymbol = new HashMap<>();
+        for (StockInstrument stock : stockInstrumentRepository.findBySymbolIn(lookupSymbols)) {
+            String canonicalSymbol = normalizeSymbol(stock.getSymbol());
+            if (canonicalSymbol == null) {
+                continue;
+            }
+
+            StockInstrument current = stockBySymbol.get(canonicalSymbol);
+            if (current == null || stock.getId() < current.getId()) {
+                stockBySymbol.put(canonicalSymbol, stock);
+            }
+        }
 
         for (Map.Entry<String, List<NormalizedMarketData>> entry : bySymbol.entrySet()) {
             String symbol = entry.getKey();
@@ -164,6 +182,9 @@ public class MarketDataService {
                     .max(Comparator.comparing(NormalizedMarketData::tradeDate))
                     .orElse(null);
             if (latestItem != null && latestItem.closePrice() != null) {
+                if (!symbol.equals(stock.getSymbol())) {
+                    stock.setSymbol(symbol);
+                }
                 stock.setLastPrice(latestItem.closePrice());
                 stock.setUpdatedAt(LocalDateTime.now());
                 stockInstrumentRepository.save(stock);
@@ -230,11 +251,23 @@ public class MarketDataService {
             return null;
         }
 
-        String normalized = symbol.trim().toUpperCase();
+        String normalized = symbol.trim().toUpperCase(Locale.ROOT);
 
         if (normalized.contains(":")) {
             normalized = normalized.substring(normalized.lastIndexOf(':') + 1);
         }
+
+        normalized = normalized.replaceAll("[^A-Z0-9._-]", "");
+        if (normalized.isBlank()) {
+            return null;
+        }
+
+        if (normalized.endsWith(EGX_SUFFIX)) {
+            return normalized.length() <= SYMBOL_MAX_LENGTH
+                    ? normalized
+                    : normalized.substring(0, SYMBOL_MAX_LENGTH);
+        }
+
         if (normalized.contains(".")) {
             normalized = normalized.substring(0, normalized.indexOf('.'));
         }
@@ -244,9 +277,10 @@ public class MarketDataService {
             return null;
         }
 
-        return normalized.length() <= SYMBOL_MAX_LENGTH
-                ? normalized
-                : normalized.substring(0, SYMBOL_MAX_LENGTH);
+        String canonical = normalized + EGX_SUFFIX;
+        return canonical.length() <= SYMBOL_MAX_LENGTH
+                ? canonical
+                : canonical.substring(0, SYMBOL_MAX_LENGTH);
     }
 
     private BigDecimal normalizeRequiredPrice(BigDecimal price) {

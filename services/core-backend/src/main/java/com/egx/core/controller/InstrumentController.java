@@ -1,15 +1,17 @@
 package com.egx.core.controller;
 
-import com.egx.core.service.InstrumentSyncService;
+import java.util.ArrayList;
+import java.util.List;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.ArrayList;
-import java.util.List;
+import com.egx.core.service.InstrumentSyncService;
 
 @RestController
 @RequestMapping({"/instruments", "/api/core/instruments"})
@@ -21,6 +23,24 @@ public class InstrumentController {
 
     public InstrumentController(InstrumentSyncService instrumentSyncService) {
         this.instrumentSyncService = instrumentSyncService;
+    }
+
+    @GetMapping({"", "/catalog", "/ids"})
+    public List<InstrumentCatalogItemResponse> listCatalog() {
+        List<InstrumentSyncService.InstrumentCatalogItem> catalog = instrumentSyncService.listInstrumentCatalog();
+        if (catalog.isEmpty()) {
+            instrumentSyncService.bulkUpsert(List.of());
+            catalog = instrumentSyncService.listInstrumentCatalog();
+        }
+
+        return catalog.stream()
+                .map(item -> new InstrumentCatalogItemResponse(
+                        item.instrumentId(),
+                        item.symbol(),
+                        item.name(),
+                        item.sectorCode()
+                ))
+                .toList();
     }
 
     @PostMapping("/bulk")
@@ -63,6 +83,9 @@ public class InstrumentController {
     }
 
     public record InstrumentBulkItem(String symbol, String name, String sector) {
+    }
+
+    public record InstrumentCatalogItemResponse(Long instrumentId, String symbol, String name, String sectorCode) {
     }
 
     public record BulkSyncResponse(int received, int inserted, int updated, int skipped, String message) {

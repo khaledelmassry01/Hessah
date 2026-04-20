@@ -36,6 +36,12 @@ spring:
             - Path=/api/core/**
           filters:
             - StripPrefix=2
+        - id: core-backend-legacy
+          uri: ${CORE_BACKEND_URL:http://core-backend:8081}
+          predicates:
+            - Path=/api/auth/**,/api/users/**,/api/wallet/**,/api/wallets/**,/api/portfolio/**,/api/portfolio-runs/**,/api/portfolios/**,/api/instruments/**,/api/market-data/**,/api/model-performance/**,/api/premium/**,/api/stop-rules/**,/api/ai/performance-summary
+          filters:
+            - StripPrefix=1
         - id: ai-engine
           uri: ${AI_ENGINE_URL:http://ai-engine:8000}
           predicates:

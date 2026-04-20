@@ -15,6 +15,8 @@ import com.egx.core.service.TearSheetService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotNull;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -22,15 +24,17 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @RestController
-@RequestMapping("/premium")
+@RequestMapping({"/premium", "/api/core/premium"})
 @Validated
 public class PremiumController {
 
@@ -105,6 +109,25 @@ public class PremiumController {
         );
     }
 
+    @GetMapping({"/stop-rules", "/market-watch"})
+    public List<StopRuleResponse> listStopRules(Authentication authentication) {
+        Long userId = resolveUserId(authentication);
+        premiumAccessService.assertPremium(userId);
+
+        return stopRuleRepository.findByUserIdOrderByUpdatedAtDesc(userId)
+                .stream()
+                .map(rule -> new StopRuleResponse(
+                        rule.getId(),
+                        rule.getUserId(),
+                        rule.getStockId(),
+                        rule.getPortfolioRunId(),
+                        rule.getStopLossPct(),
+                        rule.getTakeProfitPct(),
+                        rule.getIsActive()
+                ))
+                .toList();
+    }
+
     @GetMapping("/tear-sheet/{portfolioRunId}")
     public TearSheetService.TearSheetResponse getTearSheet(@PathVariable Long portfolioRunId) {
         PortfolioRun run = portfolioRunRepository.findById(portfolioRunId)
@@ -119,6 +142,19 @@ public class PremiumController {
             return defaultValue;
         }
         return value;
+    }
+
+    private Long resolveUserId(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication is required");
+        }
+
+        Object principal = authentication.getPrincipal();
+        if (principal instanceof Number number) {
+            return number.longValue();
+        }
+
+        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Unable to resolve authenticated user");
     }
 
     public record BacktestRequest(
