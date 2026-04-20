@@ -27,6 +27,7 @@ import java.util.stream.Collectors;
 @EnableWebSecurity
 public class SecurityConfig {
 
+import com.egx.core.security.AuthRateLimitFilter;
     private final boolean requireAuth;
     private final boolean productionMode;
     private final boolean forceHttps;
@@ -35,6 +36,7 @@ public class SecurityConfig {
     private final SecurityRateLimitingFilter securityRateLimitingFilter;
 
     public SecurityConfig(
+    private final AuthRateLimitFilter authRateLimitFilter;
             @Value("${app.security.require-auth:true}") boolean requireAuth,
             @Value("${app.security.production-mode:false}") boolean productionMode,
             @Value("${app.security.force-https:false}") boolean forceHttps,
@@ -45,6 +47,7 @@ public class SecurityConfig {
     ) {
         this.requireAuth = requireAuth;
         this.productionMode = productionMode;
+            AuthRateLimitFilter authRateLimitFilter,
         this.forceHttps = forceHttps;
         this.allowedOrigins = allowedOrigins;
         this.jwtAuthFilter = jwtAuthFilter;
@@ -52,6 +55,7 @@ public class SecurityConfig {
     }
 
     @Bean
+        this.authRateLimitFilter = authRateLimitFilter;
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         if (forceHttps) {
             http.requiresChannel(channel -> channel.anyRequest().requiresSecure());
@@ -87,6 +91,7 @@ public class SecurityConfig {
 
                     // Auth endpoints stay open by design.
                     auth.requestMatchers("/auth/**", "/api/core/auth/**").permitAll();
+                .addFilterBefore(authRateLimitFilter, JwtAuthFilter.class)
 
                     // User profile and session endpoints must always be authenticated.
                     auth.requestMatchers("/users/**", "/api/core/users/**").authenticated();
@@ -95,16 +100,9 @@ public class SecurityConfig {
             auth.requestMatchers(
                 "/premium/**",
                 "/api/core/premium/**",
-                "/ai/performance-summary",
-                "/api/core/ai/performance-summary"
-            ).hasRole("PREMIUM");
-
-                    // Protect all gateway-routed core APIs.
-                    auth.requestMatchers("/api/core/**").authenticated();
-
-                    if (requireAuth) {
-                        auth.anyRequest().authenticated();
-                    } else {
+        cors.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With", "X-Session-Id"));
+        cors.setExposedHeaders(List.of("Authorization", "X-Session-Id"));
+        cors.setAllowCredentials(true);
                         auth.anyRequest().permitAll();
                     }
                 })

@@ -23,8 +23,8 @@ public class SessionService {
         this.jwtService = jwtService;
     }
 
-    public List<SessionView> getActiveSessions(Long userId, String authorizationHeader) {
-        String currentRefreshTokenJti = extractCurrentRefreshTokenJti(authorizationHeader);
+    public List<SessionView> getActiveSessions(Long userId, String accessToken) {
+        String currentRefreshTokenJti = extractCurrentRefreshTokenJti(accessToken);
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
 
         return userSessionRepository
@@ -56,8 +56,8 @@ public class SessionService {
     }
 
     @Transactional
-    public int revokeAllSessionsExceptCurrent(Long userId, String authorizationHeader) {
-        String currentRefreshTokenJti = extractCurrentRefreshTokenJti(authorizationHeader);
+    public int revokeAllSessionsExceptCurrent(Long userId, String accessToken) {
+        String currentRefreshTokenJti = extractCurrentRefreshTokenJti(accessToken);
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
 
         List<UserSession> sessions = userSessionRepository.findByUserIdAndIsRevokedFalse(userId);
@@ -78,10 +78,9 @@ public class SessionService {
         return revokedCount;
     }
 
-    private String extractCurrentRefreshTokenJti(String authorizationHeader) {
-        String accessToken = extractBearerToken(authorizationHeader);
-        if (accessToken == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Missing Authorization bearer token");
+    private String extractCurrentRefreshTokenJti(String accessToken) {
+        if (accessToken == null || accessToken.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Missing access token");
         }
 
         if (!jwtService.isTokenValid(accessToken, JwtService.TokenType.ACCESS)) {
@@ -89,20 +88,6 @@ public class SessionService {
         }
 
         return jwtService.extractRefreshTokenJti(accessToken);
-    }
-
-    private String extractBearerToken(String authorizationHeader) {
-        if (authorizationHeader == null || authorizationHeader.isBlank()) {
-            return null;
-        }
-
-        String prefix = "Bearer ";
-        if (!authorizationHeader.startsWith(prefix)) {
-            return null;
-        }
-
-        String token = authorizationHeader.substring(prefix.length()).trim();
-        return token.isBlank() ? null : token;
     }
 
     public record SessionView(

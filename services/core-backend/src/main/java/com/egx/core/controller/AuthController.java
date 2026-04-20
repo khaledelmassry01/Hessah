@@ -7,16 +7,20 @@ import com.egx.core.controller.dto.auth.RefreshAccessTokenResponse;
 import com.egx.core.controller.dto.auth.RefreshRequest;
 import com.egx.core.controller.dto.auth.RegisterRequest;
 import com.egx.core.controller.dto.auth.RegisterResponse;
+import com.egx.core.security.AuthCookieService;
 import com.egx.core.service.AuthService;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/auth")
@@ -24,9 +28,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuthController {
 
     private final AuthService authService;
+        private final AuthCookieService authCookieService;
 
-    public AuthController(AuthService authService) {
+        public AuthController(AuthService authService, AuthCookieService authCookieService) {
         this.authService = authService;
+                this.authCookieService = authCookieService;
     }
 
     @PostMapping("/register")
@@ -52,7 +58,8 @@ public class AuthController {
     @PostMapping("/login")
     public AuthTokensResponse login(
             @Valid @RequestBody LoginRequest request,
-            HttpServletRequest httpRequest
+            HttpServletRequest httpRequest,
+            HttpServletResponse httpResponse
     ) {
         AuthService.AuthTokens tokens = authService.login(
                 new AuthService.LoginCommand(
@@ -62,6 +69,8 @@ public class AuthController {
                         extractClientIp(httpRequest)
                 )
         );
+
+        authCookieService.setAuthCookies(httpResponse, tokens.tokenPair());
 
         return new AuthTokensResponse(
                 tokens.userId(),
@@ -75,16 +84,28 @@ public class AuthController {
 
     @PostMapping("/refresh")
     public RefreshAccessTokenResponse refresh(
-            @Valid @RequestBody RefreshRequest request,
-            HttpServletRequest httpRequest
+                        @RequestBody(required = false) RefreshRequest request,
+                        HttpServletRequest httpRequest,
+                        HttpServletResponse httpResponse
     ) {
+                String refreshToken = request == null ? null : request.refreshToken();
+                if (refreshToken == null || refreshToken.isBlank()) {
+                        refreshToken = authCookieService.resolveRefreshToken(httpRequest);
+                }
+
+                if (refreshToken == null || refreshToken.isBlank()) {
+                        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Refresh token is required");
+                }
+
         AuthService.AuthTokens tokens = authService.refresh(
                 new AuthService.RefreshCommand(
-                        request.refreshToken(),
+                                                refreshToken,
                         extractUserAgent(httpRequest),
                         extractClientIp(httpRequest)
                 )
         );
+
+                authCookieService.setAuthCookies(httpResponse, tokens.tokenPair());
 
         return new RefreshAccessTokenResponse(
                 tokens.userId(),
@@ -99,11 +120,33 @@ public class AuthController {
     @PostMapping("/logout")
     public MessageResponse logout(
             @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false)
-            String authorizationHeader
+            String authorizationHeader,
+            HttpServletRequest httpRequest,
+            HttpServletResponse httpResponse
     ) {
-        authService.logout(authorizationHeader);
+        String accessToken = extractBearerToken(authorizationHeader);
+        if (accessToken == null) {
+            accessToken = authCookieService.resolveAccessToken(httpRequest);
+        }
+
+        authService.logout(accessToken);
+        authCookieService.clearAuthCookies(httpResponse);
         return new MessageResponse("Logged out successfully");
     }
+
+        private String extractBearerToken(String authorizationHeader) {
+                if (authorizationHeader == null || authorizationHeader.isBlank()) {
+                        return null;
+                }
+
+                String prefix = "Bearer ";
+                if (!authorizationHeader.startsWith(prefix)) {
+                        return null;
+                }
+
+                String token = authorizationHeader.substring(prefix.length()).trim();
+                return token.isBlank() ? null : token;
+        }
 
         private String extractUserAgent(HttpServletRequest request) {
                 String userAgent = request.getHeader(HttpHeaders.USER_AGENT);

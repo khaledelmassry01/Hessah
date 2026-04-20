@@ -32,7 +32,9 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -41,6 +43,7 @@ public class PortfolioService {
     private static final int CURRENCY_SCALE = 4;
     private static final int WEIGHT_SCALE = 8;
     private static final String DEFAULT_SECTOR_CODE = "FIN_SERV";
+    private static final BigDecimal FALLBACK_LAST_PRICE = new BigDecimal("1.0000");
 
     private final WalletService walletService;
     private final SubscriptionRepository subscriptionRepository;
@@ -52,6 +55,7 @@ public class PortfolioService {
     private final AllocationService allocationService;
     private final OrderService orderService;
     private final ObjectMapper objectMapper;
+    private final SecurityAuditService securityAuditService;
 
     public PortfolioService(
             WalletService walletService,
@@ -63,7 +67,8 @@ public class PortfolioService {
             AiPredictionAuditRepository aiPredictionAuditRepository,
             AllocationService allocationService,
             OrderService orderService,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            SecurityAuditService securityAuditService
     ) {
         this.walletService = walletService;
         this.subscriptionRepository = subscriptionRepository;
@@ -75,71 +80,91 @@ public class PortfolioService {
         this.allocationService = allocationService;
         this.orderService = orderService;
         this.objectMapper = objectMapper;
+        this.securityAuditService = securityAuditService;
     }
 
     @Transactional
     public PortfolioExecutionResult generatePortfolio(Long userId, BigDecimal requestedAmount, RiskLevel riskLevel) {
-        if (requestedAmount == null || requestedAmount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("requestedAmount must be greater than zero");
-        }
+        PortfolioRun portfolioRun = null;
 
-        SubscriptionTier tier = resolveTier(userId);
-        enforceTierForRisk(tier, riskLevel);
+        try {
+            if (requestedAmount == null || requestedAmount.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new IllegalArgumentException("requestedAmount must be greater than zero");
+            }
 
-        PortfolioRun portfolioRun = new PortfolioRun();
-        portfolioRun.setRequestUuid(UUID.randomUUID().toString());
-        portfolioRun.setUserId(userId);
-        portfolioRun.setRiskLevel(riskLevel);
-        portfolioRun.setRequestedAmountEgp(money(requestedAmount));
-        portfolioRun.setFeeBufferRate(new BigDecimal("0.00500"));
-        portfolioRun.setInvestableBudgetEgp(BigDecimal.ZERO.setScale(CURRENCY_SCALE, RoundingMode.HALF_DOWN));
-        portfolioRun.setRunStatus(PortfolioRunStatus.PENDING);
-        portfolioRun.setGeneratedAt(LocalDateTime.now());
-        portfolioRun = portfolioRunRepository.save(portfolioRun);
+            SubscriptionTier tier = resolveTier(userId);
+            enforceTierForRisk(tier, riskLevel);
 
-        WalletService.FeeBufferDeduction fee = walletService.deductFeeBuffer(userId, requestedAmount, portfolioRun.getId());
-        portfolioRun.setInvestableBudgetEgp(fee.investableBudget());
+            portfolioRun = new PortfolioRun();
+            portfolioRun.setRequestUuid(UUID.randomUUID().toString());
+            portfolioRun.setUserId(userId);
+            portfolioRun.setRiskLevel(riskLevel);
+            portfolioRun.setRequestedAmountEgp(money(requestedAmount));
+            portfolioRun.setFeeBufferRate(new BigDecimal("0.00500"));
+            portfolioRun.setInvestableBudgetEgp(BigDecimal.ZERO.setScale(CURRENCY_SCALE, RoundingMode.HALF_DOWN));
+            portfolioRun.setRunStatus(PortfolioRunStatus.PENDING);
+            portfolioRun.setGeneratedAt(LocalDateTime.now());
+            portfolioRun = portfolioRunRepository.save(portfolioRun);
 
-        AiPredictionRequest aiRequest = buildAiRequest(portfolioRun, tier);
-        AiPredictionResponse aiResponse = aiClient.predict(aiRequest);
-        persistAiAudit(portfolioRun.getId(), aiRequest, aiResponse);
+            WalletService.FeeBufferDeduction fee = walletService.deductFeeBuffer(userId, requestedAmount, portfolioRun.getId());
+            portfolioRun.setInvestableBudgetEgp(fee.investableBudget());
 
-        String aiStatus = aiResponse.getStatus() == null ? "FAILED" : aiResponse.getStatus().toUpperCase();
-        if ("FAILED".equals(aiStatus)) {
-            portfolioRun.setRunStatus(PortfolioRunStatus.FAILED);
+            AiPredictionRequest aiRequest = buildAiRequest(portfolioRun, tier);
+            AiPredictionResponse aiResponse = aiClient.predict(aiRequest);
+            persistAiAudit(portfolioRun.getId(), aiRequest, aiResponse);
+
+            String aiStatus = aiResponse.getStatus() == null ? "FAILED" : aiResponse.getStatus().toUpperCase();
+            if ("FAILED".equals(aiStatus)) {
+                portfolioRun.setRunStatus(PortfolioRunStatus.FAILED);
+                portfolioRunRepository.save(portfolioRun);
+                walletService.creditResidual(userId, fee.investableBudget(), portfolioRun.getId());
+                throw new AiIntegrationException("AI engine returned FAILED status for request " + portfolioRun.getRequestUuid());
+            }
+
+            List<PortfolioTarget> targets = persistTargets(portfolioRun, fee.investableBudget(), aiResponse.getAllocations(), riskLevel);
+            AllocationService.AllocationResult allocationResult = allocationService.allocate(
+                    userId,
+                    portfolioRun.getId(),
+                    fee.investableBudget(),
+                    targets
+            );
+
+            List<TradeOrder> orders = orderService.createPendingOrdersFromAllocations(
+                    userId,
+                    portfolioRun.getId(),
+                    allocationResult.executions()
+            );
+
+            if ("PARTIAL".equals(aiStatus)) {
+                portfolioRun.setRunStatus(PortfolioRunStatus.PARTIAL);
+            } else {
+                portfolioRun.setRunStatus(PortfolioRunStatus.COMPLETED);
+            }
+            portfolioRun.setModelVersion(aiResponse.getModelVersion());
             portfolioRunRepository.save(portfolioRun);
-            walletService.creditResidual(userId, fee.investableBudget(), portfolioRun.getId());
-            throw new AiIntegrationException("AI engine returned FAILED status for request " + portfolioRun.getRequestUuid());
+
+            Map<String, Object> successDetails = new LinkedHashMap<>();
+            successDetails.put("runId", portfolioRun.getId());
+            successDetails.put("riskLevel", riskLevel == null ? null : riskLevel.name());
+            successDetails.put("requestedAmountEgp", requestedAmount);
+            successDetails.put("status", portfolioRun.getRunStatus().name());
+            securityAuditService.log("PORTFOLIO_GENERATION", userId, "SUCCESS", successDetails);
+
+            return new PortfolioExecutionResult(
+                    portfolioRun,
+                    allocationResult.executions(),
+                    orders,
+                    allocationResult.residualReturned()
+            );
+        } catch (RuntimeException ex) {
+            Map<String, Object> failureDetails = new LinkedHashMap<>();
+            failureDetails.put("runId", portfolioRun == null ? null : portfolioRun.getId());
+            failureDetails.put("riskLevel", riskLevel == null ? null : riskLevel.name());
+            failureDetails.put("requestedAmountEgp", requestedAmount);
+            failureDetails.put("reason", ex.getClass().getSimpleName());
+            securityAuditService.log("PORTFOLIO_GENERATION", userId, "FAILED", failureDetails);
+            throw ex;
         }
-
-        List<PortfolioTarget> targets = persistTargets(portfolioRun, fee.investableBudget(), aiResponse.getAllocations(), riskLevel);
-        AllocationService.AllocationResult allocationResult = allocationService.allocate(
-                userId,
-                portfolioRun.getId(),
-                fee.investableBudget(),
-                targets
-        );
-
-        List<TradeOrder> orders = orderService.createPendingOrdersFromAllocations(
-                userId,
-                portfolioRun.getId(),
-                allocationResult.executions()
-        );
-
-        if ("PARTIAL".equals(aiStatus)) {
-            portfolioRun.setRunStatus(PortfolioRunStatus.PARTIAL);
-        } else {
-            portfolioRun.setRunStatus(PortfolioRunStatus.COMPLETED);
-        }
-        portfolioRun.setModelVersion(aiResponse.getModelVersion());
-        portfolioRunRepository.save(portfolioRun);
-
-        return new PortfolioExecutionResult(
-                portfolioRun,
-                allocationResult.executions(),
-                orders,
-                allocationResult.residualReturned()
-        );
     }
 
     private SubscriptionTier resolveTier(Long userId) {
@@ -206,6 +231,12 @@ public class PortfolioService {
             StockInstrument stock = stockInstrumentRepository
                     .findBySymbol(item.getSymbol())
                     .orElseGet(() -> autoRegisterInstrument(item.getSymbol()));
+
+            if (stock.getLastPrice() == null || stock.getLastPrice().compareTo(BigDecimal.ZERO) <= 0) {
+                stock.setLastPrice(FALLBACK_LAST_PRICE);
+                stock.setUpdatedAt(LocalDateTime.now());
+                stock = stockInstrumentRepository.save(stock);
+            }
 
             if (Boolean.TRUE.equals(stock.getIsSuspended())) {
                 throw new IllegalStateException("AI response contains suspended stock: " + stock.getSymbol());

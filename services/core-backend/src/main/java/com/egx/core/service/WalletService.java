@@ -13,6 +13,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Service
 public class WalletService {
@@ -22,13 +24,16 @@ public class WalletService {
 
     private final WalletRepository walletRepository;
     private final WalletLedgerEntryRepository walletLedgerEntryRepository;
+    private final SecurityAuditService securityAuditService;
 
     public WalletService(
             WalletRepository walletRepository,
-            WalletLedgerEntryRepository walletLedgerEntryRepository
+            WalletLedgerEntryRepository walletLedgerEntryRepository,
+            SecurityAuditService securityAuditService
     ) {
         this.walletRepository = walletRepository;
         this.walletLedgerEntryRepository = walletLedgerEntryRepository;
+        this.securityAuditService = securityAuditService;
     }
 
     public Wallet getWalletByUserId(Long userId) {
@@ -38,26 +43,40 @@ public class WalletService {
 
     @Transactional
     public Wallet fundWallet(Long userId, BigDecimal amountEgp) {
-        BigDecimal normalizedAmount = money(amountEgp);
-        if (normalizedAmount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("Funding amount must be greater than zero");
+        try {
+            BigDecimal normalizedAmount = money(amountEgp);
+            if (normalizedAmount.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new IllegalArgumentException("Funding amount must be greater than zero");
+            }
+
+            Wallet wallet = getWalletByUserId(userId);
+            wallet.setAvailableBalance(money(defaultIfNull(wallet.getAvailableBalance()).add(normalizedAmount)));
+            wallet.setUpdatedAt(LocalDateTime.now());
+            wallet = walletRepository.save(wallet);
+
+            persistLedgerEntry(
+                    wallet.getId(),
+                    LedgerEntryType.DEPOSIT,
+                    normalizedAmount,
+                    "WALLET_FUND",
+                    null,
+                    "Wallet funded via API"
+            );
+
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("walletId", wallet.getId());
+            details.put("amountEgp", normalizedAmount);
+            details.put("availableBalance", wallet.getAvailableBalance());
+            securityAuditService.log("WALLET_FUND", userId, "SUCCESS", details);
+
+            return wallet;
+        } catch (RuntimeException ex) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("amountEgp", amountEgp);
+            details.put("reason", ex.getClass().getSimpleName());
+            securityAuditService.log("WALLET_FUND", userId, "FAILED", details);
+            throw ex;
         }
-
-        Wallet wallet = getWalletByUserId(userId);
-        wallet.setAvailableBalance(money(defaultIfNull(wallet.getAvailableBalance()).add(normalizedAmount)));
-        wallet.setUpdatedAt(LocalDateTime.now());
-        wallet = walletRepository.save(wallet);
-
-        persistLedgerEntry(
-                wallet.getId(),
-                LedgerEntryType.DEPOSIT,
-                normalizedAmount,
-                "WALLET_FUND",
-                null,
-                "Wallet funded via API"
-        );
-
-        return wallet;
     }
 
     @Transactional

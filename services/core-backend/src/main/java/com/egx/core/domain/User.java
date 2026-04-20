@@ -4,8 +4,10 @@ import java.time.LocalDateTime;
 
 import com.egx.core.domain.enums.AccountStatus;
 import com.egx.core.domain.enums.KycStatus;
+import com.egx.core.security.AesStringAttributeConverter;
 
 import jakarta.persistence.Column;
+import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
@@ -31,10 +33,12 @@ public class User {
     @Column(name = "password_hash", nullable = false, length = 255)
     private String passwordHash;
 
-    @Column(name = "full_name", nullable = false, length = 255)
+    @Convert(converter = AesStringAttributeConverter.class)
+    @Column(name = "full_name", nullable = false, length = 1024)
     private String fullName;
 
-    @Column(length = 40)
+    @Convert(converter = AesStringAttributeConverter.class)
+    @Column(length = 255)
     private String phone;
 
     @Enumerated(EnumType.STRING)

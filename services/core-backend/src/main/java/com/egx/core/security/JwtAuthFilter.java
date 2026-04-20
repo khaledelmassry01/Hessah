@@ -32,17 +32,20 @@ public class JwtAuthFilter extends OncePerRequestFilter {
     private final TokenBlacklistRepository tokenBlacklistRepository;
     private final UserRepository userRepository;
     private final UserSessionRepository userSessionRepository;
+    private final AuthCookieService authCookieService;
 
     public JwtAuthFilter(
             JwtService jwtService,
             TokenBlacklistRepository tokenBlacklistRepository,
             UserRepository userRepository,
-            UserSessionRepository userSessionRepository
+            UserSessionRepository userSessionRepository,
+            AuthCookieService authCookieService
     ) {
         this.jwtService = jwtService;
         this.tokenBlacklistRepository = tokenBlacklistRepository;
         this.userRepository = userRepository;
         this.userSessionRepository = userSessionRepository;
+        this.authCookieService = authCookieService;
     }
 
     @Override
@@ -59,12 +62,16 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         }
 
         String authorizationHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
-        if (authorizationHeader == null || !authorizationHeader.startsWith("Bearer ")) {
+        String token = extractBearerToken(authorizationHeader);
+        if (token == null) {
+            token = authCookieService.resolveAccessToken(request);
+        }
+
+        if (token == null) {
             filterChain.doFilter(request, response);
             return;
         }
 
-        String token = authorizationHeader.substring(7).trim();
         if (token.isBlank()) {
             rejectUnauthorized(response, "Missing bearer token");
             return;
@@ -115,6 +122,20 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         }
 
         filterChain.doFilter(request, response);
+    }
+
+    private String extractBearerToken(String authorizationHeader) {
+        if (authorizationHeader == null || authorizationHeader.isBlank()) {
+            return null;
+        }
+
+        String prefix = "Bearer ";
+        if (!authorizationHeader.startsWith(prefix)) {
+            return null;
+        }
+
+        String token = authorizationHeader.substring(prefix.length()).trim();
+        return token.isBlank() ? null : token;
     }
 
     private boolean isPublicPath(String path) {

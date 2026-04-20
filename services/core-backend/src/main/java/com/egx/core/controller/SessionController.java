@@ -3,7 +3,9 @@ package com.egx.core.controller;
 import com.egx.core.controller.dto.session.RevokeAllSessionsResponse;
 import com.egx.core.controller.dto.session.RevokeSessionResponse;
 import com.egx.core.controller.dto.session.UserSessionResponse;
+import com.egx.core.security.AuthCookieService;
 import com.egx.core.service.SessionService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.constraints.Positive;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -25,20 +27,24 @@ import java.util.List;
 public class SessionController {
 
     private final SessionService sessionService;
+    private final AuthCookieService authCookieService;
 
-    public SessionController(SessionService sessionService) {
+    public SessionController(SessionService sessionService, AuthCookieService authCookieService) {
         this.sessionService = sessionService;
+        this.authCookieService = authCookieService;
     }
 
     @GetMapping
     public List<UserSessionResponse> listSessions(
             Authentication authentication,
+            HttpServletRequest httpRequest,
             @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false)
             String authorizationHeader
     ) {
         Long userId = resolveUserId(authentication);
+        String accessToken = resolveAccessToken(httpRequest, authorizationHeader);
 
-        return sessionService.getActiveSessions(userId, authorizationHeader)
+        return sessionService.getActiveSessions(userId, accessToken)
                 .stream()
                 .map(this::mapSession)
                 .toList();
@@ -58,13 +64,37 @@ public class SessionController {
     @DeleteMapping
     public RevokeAllSessionsResponse revokeAllSessionsExceptCurrent(
             Authentication authentication,
+            HttpServletRequest httpRequest,
             @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false)
             String authorizationHeader
     ) {
         Long userId = resolveUserId(authentication);
-        int revokedCount = sessionService.revokeAllSessionsExceptCurrent(userId, authorizationHeader);
+        String accessToken = resolveAccessToken(httpRequest, authorizationHeader);
+        int revokedCount = sessionService.revokeAllSessionsExceptCurrent(userId, accessToken);
 
         return new RevokeAllSessionsResponse(revokedCount, "Other sessions revoked successfully");
+    }
+
+    private String resolveAccessToken(HttpServletRequest request, String authorizationHeader) {
+        String token = extractBearerToken(authorizationHeader);
+        if (token != null) {
+            return token;
+        }
+        return authCookieService.resolveAccessToken(request);
+    }
+
+    private String extractBearerToken(String authorizationHeader) {
+        if (authorizationHeader == null || authorizationHeader.isBlank()) {
+            return null;
+        }
+
+        String prefix = "Bearer ";
+        if (!authorizationHeader.startsWith(prefix)) {
+            return null;
+        }
+
+        String token = authorizationHeader.substring(prefix.length()).trim();
+        return token.isBlank() ? null : token;
     }
 
     private Long resolveUserId(Authentication authentication) {
