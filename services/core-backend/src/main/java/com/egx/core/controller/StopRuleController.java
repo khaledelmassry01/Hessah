@@ -1,7 +1,7 @@
 package com.egx.core.controller;
 
-import com.egx.core.repository.StopRuleRepository;
-import com.egx.core.service.PremiumAccessService;
+import java.util.List;
+
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -9,10 +9,16 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.util.List;
+import com.egx.core.repository.StopRuleRepository;
+import com.egx.core.service.PremiumAccessService;
 
 @RestController
-@RequestMapping({"/stop-rules", "/api/core/stop-rules"})
+@RequestMapping({
+    "/stop-rules",
+    "/api/core/stop-rules",
+    "/premium/stop-rules",
+    "/api/core/premium/stop-rules"
+})
 public class StopRuleController {
 
     private final PremiumAccessService premiumAccessService;

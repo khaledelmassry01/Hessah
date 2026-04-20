@@ -1,4 +1,7 @@
+import os
+import uuid
 import logging
+from datetime import date
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -9,11 +12,12 @@ from .contracts import (
     AllocationItem,
     BacktestRequest,
     BacktestResponse,
+    ConstraintBlock,
     PredictRequest,
     PredictResponse,
     RejectedSymbol,
 )
-from .data_pipeline import DataPipelineError, load_market_dataset
+from .data_pipeline import DataPipelineError, canonicalize_symbol, load_market_dataset
 from .historical_ingestion import ingest_historical_market_data_to_core
 from .instrument_sync import fetch_core_instrument_catalog, sync_live_instruments_to_core
 from .optimizer import optimize_max_sharpe
@@ -21,6 +25,10 @@ from .optimizer import optimize_max_sharpe
 app = FastAPI(title="EGX AI Engine", version="0.0.1")
 LOGGER = logging.getLogger(__name__)
 MODEL_VERSION = "mpt-egx30-v3"
+DEFAULT_RETRAIN_BUDGET_EGP = 500_000.0
+DEFAULT_RETRAIN_LOOKBACK_BUSINESS_DAYS = 252
+DEFAULT_RETRAIN_RISK_LEVEL = "HIGH"
+DEFAULT_RETRAIN_TIER = "PREMIUM"
 
 
 @app.get("/health")
@@ -44,12 +52,27 @@ def sync_instruments() -> dict[str, object]:
 
 
 @app.post("/historical/ingest")
-def ingest_historical_data(years: int = 5) -> dict[str, object]:
+def ingest_historical_data(years: int = 10, trigger_backtest: bool = True) -> dict[str, object]:
     if years < 1 or years > 10:
         raise HTTPException(status_code=400, detail="years must be between 1 and 10")
 
     try:
         result = ingest_historical_market_data_to_core(years=years)
+
+        warnings = list(result.get("warnings") or [])
+        if trigger_backtest:
+            if str(result.get("status") or "").upper() == "SUCCESS" and int(result.get("rowsSynced") or 0) > 0:
+                backtest_result = _run_post_ingest_backtest_cycle()
+                result["trainingBacktest"] = backtest_result.model_dump(mode="json")
+                result["trainingStatus"] = backtest_result.status
+                result["predictedReturn"] = backtest_result.expected_return
+                result["predictedVolatility"] = backtest_result.expected_volatility
+                warnings.extend([f"Training/backtest: {item}" for item in backtest_result.warnings])
+            else:
+                warnings.append("Training/backtest skipped because ingestion did not sync any market rows")
+
+        result["warnings"] = _dedupe_warnings([item for item in warnings if isinstance(item, str)])
+
         LOGGER.info(
             "Historical ingestion completed: years=%s prepared=%s synced=%s source=%s",
             years,
@@ -286,22 +309,99 @@ def _canonical_symbol(raw_symbol: object) -> str | None:
     if not isinstance(raw_symbol, str):
         return None
 
-    symbol = raw_symbol.strip().upper()
-    if not symbol:
-        return None
+    mapped = canonicalize_symbol(raw_symbol, allow_unmapped=False)
+    if mapped is not None:
+        return mapped
 
-    if ":" in symbol:
-        symbol = symbol.split(":")[-1]
+    return canonicalize_symbol(raw_symbol, allow_unmapped=True)
 
-    if symbol.endswith(".CA"):
-        return symbol[:16]
 
-    if "." in symbol:
-        symbol = symbol.split(".")[0]
+def _run_post_ingest_backtest_cycle() -> BacktestResponse:
+    budget_egp = _resolve_env_float("AI_RETRAIN_BUDGET_EGP", DEFAULT_RETRAIN_BUDGET_EGP, minimum=1.0)
+    lookback_days = int(
+        _resolve_env_float(
+            "AI_RETRAIN_LOOKBACK_BUSINESS_DAYS",
+            float(DEFAULT_RETRAIN_LOOKBACK_BUSINESS_DAYS),
+            minimum=10.0,
+        )
+    )
 
-    symbol = "".join(ch for ch in symbol if ch.isalnum() or ch in {"_", "-"})
-    if not symbol:
-        return None
+    risk_level = _resolve_enum_env(
+        "AI_RETRAIN_RISK_LEVEL",
+        {"LOW", "MEDIUM", "HIGH"},
+        DEFAULT_RETRAIN_RISK_LEVEL,
+    )
+    tier = _resolve_enum_env(
+        "AI_RETRAIN_TIER",
+        {"FREE", "PREMIUM"},
+        DEFAULT_RETRAIN_TIER,
+    )
 
-    canonical = f"{symbol}.CA"
-    return canonical[:16]
+    backtest_payload = BacktestRequest(
+        request_id=f"post-ingest-{uuid.uuid4().hex[:12]}",
+        user_id="1",
+        budget_egp=budget_egp,
+        historical_date=_subtract_business_days(date.today(), lookback_days),
+        risk_level=risk_level,
+        tier=tier,
+        constraints=ConstraintBlock(
+            max_sector_weight=0.40,
+            max_adv30_participation=0.05,
+            exclude_suspended=True,
+            allow_fractional_shares=False,
+        ),
+    )
+
+    return safe_run_backtest(backtest_payload)
+
+
+def _subtract_business_days(base_date: date, business_days: int) -> date:
+    days = max(1, business_days)
+    current = base_date
+    moved = 0
+
+    while moved < days:
+        current = current.fromordinal(current.toordinal() - 1)
+        if current.weekday() < 5:
+            moved += 1
+
+    return current
+
+
+def _resolve_env_float(env_key: str, default_value: float, minimum: float | None = None) -> float:
+    raw_value = os.getenv(env_key)
+    if raw_value is None:
+        resolved = float(default_value)
+    else:
+        try:
+            resolved = float(raw_value)
+        except (TypeError, ValueError):
+            resolved = float(default_value)
+
+    if minimum is not None:
+        resolved = max(float(minimum), resolved)
+
+    return resolved
+
+
+def _resolve_enum_env(env_key: str, allowed_values: set[str], default_value: str) -> str:
+    raw_value = os.getenv(env_key, default_value)
+    normalized = str(raw_value or default_value).strip().upper()
+    if normalized in allowed_values:
+        return normalized
+    return default_value
+
+
+def _dedupe_warnings(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+
+    for item in items:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+
+        seen.add(normalized)
+        deduped.append(normalized)
+
+    return deduped

@@ -1,55 +1,69 @@
 from __future__ import annotations
 
-import importlib
 import logging
+import os
 import random
 from dataclasses import dataclass
-from datetime import date
-from functools import lru_cache
-from typing import Any, Callable
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
 TRADING_DAYS_PER_YEAR = 252
-EGX_EXCHANGE = "EGX"
-EGX_INTERVAL = "Daily"
 DEFAULT_BARS = 252
-FETCH_BUFFER_BARS = 900
+EGX_SUFFIX = ".CA"
+SYMBOL_MAX_LENGTH = 16
+MINIMUM_RETURNS_OBSERVATIONS = 40
+HISTORICAL_DATA_DIR_ENV_VAR = "HISTORICAL_DATA_DIR"
+DEFAULT_HISTORICAL_DATA_DIR = Path("/app/data/historical")
+LOCAL_HISTORICAL_DATA_DIR = Path(__file__).resolve().parent / "data" / "historical"
 
-EGX30_SYMBOLS = [
-    "COMI",
-    "HRHO",
-    "SWDY",
-    "ETEL",
-    "EFIH",
-    "ABUK",
-    "FWRY",
-    "PHDC",
-    "TMGH",
-    "ORWE",
-    "EAST",
-    "AMOC",
-    "MFPC",
-    "SKPC",
-    "CCAP",
-    "HELI",
-    "ORAS",
-    "EKHO",
-    "MICH",
-    "ALCN",
-    "ORHD",
-    "JUFO",
-    "DOMT",
-    "GDWA",
-    "CIEB",
-    "AUTO",
-    "BTFH",
-    "OBRI",
-    "RAYA",
-    "CLHO",
-]
+# Hardcoded canonical symbol map to guarantee CSV and API symbol compatibility.
+EGX30_SYMBOL_TO_CANONICAL = {
+    "COMI": "COMI.CA",
+    "HRHO": "HRHO.CA",
+    "SWDY": "SWDY.CA",
+    "ETEL": "ETEL.CA",
+    "EFIH": "EFIH.CA",
+    "ABUK": "ABUK.CA",
+    "FWRY": "FWRY.CA",
+    "PHDC": "PHDC.CA",
+    "TMGH": "TMGH.CA",
+    "ORWE": "ORWE.CA",
+    "EAST": "EAST.CA",
+    "AMOC": "AMOC.CA",
+    "MFPC": "MFPC.CA",
+    "SKPC": "SKPC.CA",
+    "CCAP": "CCAP.CA",
+    "HELI": "HELI.CA",
+    "ORAS": "ORAS.CA",
+    "EKHO": "EKHO.CA",
+    "MICH": "MICH.CA",
+    "ALCN": "ALCN.CA",
+    "ORHD": "ORHD.CA",
+    "JUFO": "JUFO.CA",
+    "DOMT": "DOMT.CA",
+    "GDWA": "GDWA.CA",
+    "CIEB": "CIEB.CA",
+    "AUTO": "AUTO.CA",
+    "BTFH": "BTFH.CA",
+    "OBRI": "OBRI.CA",
+    "RAYA": "RAYA.CA",
+    "CLHO": "CLHO.CA",
+}
+
+EGX30_SYMBOLS = list(EGX30_SYMBOL_TO_CANONICAL.keys())
+EGX30_CANONICAL_SYMBOLS = list(EGX30_SYMBOL_TO_CANONICAL.values())
+
+SYMBOL_ALIAS_TO_CANONICAL: dict[str, str] = {}
+for _base_symbol, _canonical_symbol in EGX30_SYMBOL_TO_CANONICAL.items():
+    SYMBOL_ALIAS_TO_CANONICAL[_base_symbol] = _canonical_symbol
+    SYMBOL_ALIAS_TO_CANONICAL[_canonical_symbol] = _canonical_symbol
+    SYMBOL_ALIAS_TO_CANONICAL[f"{_base_symbol}.CAI"] = _canonical_symbol
+    SYMBOL_ALIAS_TO_CANONICAL[f"{_base_symbol}.EGX"] = _canonical_symbol
 
 # Hardcoded metadata fallback when egxpy does not expose sector mapping.
 DEFAULT_SECTOR_MAP = {
@@ -145,6 +159,68 @@ class MarketDataset:
     warnings: list[str]
 
 
+def resolve_historical_data_dir() -> Path:
+    configured = os.getenv(HISTORICAL_DATA_DIR_ENV_VAR, str(DEFAULT_HISTORICAL_DATA_DIR)).strip()
+    if configured:
+        configured_path = Path(configured)
+        if configured_path.exists():
+            return configured_path
+
+    return LOCAL_HISTORICAL_DATA_DIR
+
+
+def canonicalize_symbol(raw_symbol: str | None, allow_unmapped: bool = False) -> str | None:
+    if raw_symbol is None:
+        return None
+
+    symbol = str(raw_symbol).strip().upper()
+    if not symbol:
+        return None
+
+    if ":" in symbol:
+        symbol = symbol.split(":")[-1]
+
+    if symbol in SYMBOL_ALIAS_TO_CANONICAL:
+        return SYMBOL_ALIAS_TO_CANONICAL[symbol]
+
+    base = to_base_symbol(symbol)
+    if base is None:
+        return None
+
+    mapped = EGX30_SYMBOL_TO_CANONICAL.get(base)
+    if mapped is not None:
+        return mapped
+
+    if not allow_unmapped:
+        return None
+
+    candidate = f"{base}{EGX_SUFFIX}"
+    return candidate[:SYMBOL_MAX_LENGTH]
+
+
+def to_base_symbol(raw_symbol: str | None) -> str | None:
+    if raw_symbol is None:
+        return None
+
+    symbol = str(raw_symbol).strip().upper()
+    if not symbol:
+        return None
+
+    if ":" in symbol:
+        symbol = symbol.split(":")[-1]
+
+    if symbol.endswith(EGX_SUFFIX):
+        symbol = symbol[: -len(EGX_SUFFIX)]
+    elif "." in symbol:
+        symbol = symbol.split(".")[0]
+
+    symbol = "".join(ch for ch in symbol if ch.isalnum() or ch in {"_", "-"})
+    if not symbol:
+        return None
+
+    return symbol[:SYMBOL_MAX_LENGTH]
+
+
 def load_market_dataset(
     as_of_date: date,
     max_adv30_participation: float,
@@ -156,44 +232,27 @@ def load_market_dataset(
         raise ValueError("max_adv30_participation must be > 0")
 
     warnings: list[str] = []
-    sector_map = dict(DEFAULT_SECTOR_MAP)
-    suspended_symbols = _mock_suspended_symbols(as_of_date)
-
-    history_by_symbol: dict[str, pd.DataFrame] = {}
-    ohlcv_loader = _resolve_get_ohlcv_callable()
-
-    if ohlcv_loader is None:
-        warnings.append("egxpy OHLCV loader unavailable; synthetic fallback activated")
-        history_by_symbol = _generate_mock_ohlcv(EGX30_SYMBOLS, as_of_date, n_bars)
-    else:
-        for symbol in EGX30_SYMBOLS:
-            try:
-                history_by_symbol[symbol] = _fetch_symbol_ohlcv(
-                    symbol=symbol,
-                    as_of_date=as_of_date,
-                    output_bars=n_bars,
-                    fetch_bars=max(FETCH_BUFFER_BARS, n_bars),
-                    get_ohlcv_data=ohlcv_loader,
-                )
-            except Exception as exc:  # noqa: BLE001 - external source behavior can vary
-                warnings.append(f"OHLCV fetch failed for {symbol}: {exc}")
-
-        if len(history_by_symbol) < 8:
-            warnings.append("egxpy unavailable or insufficient coverage; synthetic fallback activated")
-            history_by_symbol = _generate_mock_ohlcv(EGX30_SYMBOLS, as_of_date, n_bars)
-        else:
-            missing_symbols = [symbol for symbol in EGX30_SYMBOLS if symbol not in history_by_symbol]
-            if missing_symbols:
-                history_by_symbol.update(_generate_mock_ohlcv(missing_symbols, as_of_date, n_bars))
-                warnings.append(
-                    "Partial data coverage; synthetic fallback used for: " + ", ".join(missing_symbols)
-                )
+    history_by_symbol = _load_history_from_csv(
+        as_of_date=as_of_date,
+        n_bars=n_bars,
+        warnings=warnings,
+    )
 
     prices, volumes = _build_price_volume_frames(history_by_symbol)
     returns = prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
 
-    if returns.shape[0] < 40:
+    if returns.shape[0] < MINIMUM_RETURNS_OBSERVATIONS:
         raise DataPipelineError("Insufficient return history after preprocessing")
+
+    sector_map = {
+        symbol: _resolve_sector(symbol)
+        for symbol in prices.columns
+    }
+    market_cap_rank = {
+        symbol: DEFAULT_MARKET_CAP_RANK.get(to_base_symbol(symbol) or symbol, 30)
+        for symbol in prices.columns
+    }
+    suspended_symbols = _mock_suspended_symbols(as_of_date, list(prices.columns))
 
     snapshots: dict[str, SymbolSnapshot] = {}
     for symbol in prices.columns:
@@ -230,7 +289,7 @@ def load_market_dataset(
         snapshots=snapshots,
         sector_map=sector_map,
         suspended_symbols=suspended_symbols,
-        market_cap_rank=dict(DEFAULT_MARKET_CAP_RANK),
+        market_cap_rank=market_cap_rank,
         warnings=warnings,
     )
 
@@ -243,42 +302,15 @@ def build_historical_market_data_payload(
         raise ValueError("years must be >= 1")
 
     end_date = as_of_date or date.today()
-    output_bars = max(TRADING_DAYS_PER_YEAR * years, DEFAULT_BARS)
-
+    output_bars = max(TRADING_DAYS_PER_YEAR * years, TRADING_DAYS_PER_YEAR)
+    start_date = end_date - timedelta(days=366 * years)
     warnings: list[str] = []
-    source = "live-provider"
-    history_by_symbol: dict[str, pd.DataFrame] = {}
-    ohlcv_loader = _resolve_get_ohlcv_callable()
-
-    if ohlcv_loader is None:
-        source = "fallback-synthetic"
-        warnings.append("egxpy OHLCV loader unavailable; synthetic historical payload activated")
-        history_by_symbol = _generate_mock_ohlcv(EGX30_SYMBOLS, end_date, output_bars)
-    else:
-        for symbol in EGX30_SYMBOLS:
-            try:
-                history_by_symbol[symbol] = _fetch_symbol_ohlcv(
-                    symbol=symbol,
-                    as_of_date=end_date,
-                    output_bars=output_bars,
-                    fetch_bars=max(FETCH_BUFFER_BARS, output_bars + 64),
-                    get_ohlcv_data=ohlcv_loader,
-                )
-            except Exception as exc:  # noqa: BLE001 - external source behavior can vary
-                warnings.append(f"OHLCV fetch failed for {symbol}: {exc}")
-
-        if len(history_by_symbol) < 8:
-            source = "fallback-synthetic"
-            warnings.append("egxpy unavailable or insufficient coverage; synthetic historical payload activated")
-            history_by_symbol = _generate_mock_ohlcv(EGX30_SYMBOLS, end_date, output_bars)
-        else:
-            missing_symbols = [symbol for symbol in EGX30_SYMBOLS if symbol not in history_by_symbol]
-            if missing_symbols:
-                source = "hybrid-live-synthetic"
-                history_by_symbol.update(_generate_mock_ohlcv(missing_symbols, end_date, output_bars))
-                warnings.append(
-                    "Partial historical coverage; synthetic fallback used for: " + ", ".join(missing_symbols)
-                )
+    source = "local-csv"
+    history_by_symbol = _load_history_from_csv(
+        as_of_date=end_date,
+        n_bars=output_bars,
+        warnings=warnings,
+    )
 
     payload: list[dict[str, Any]] = []
     for symbol, frame in sorted(history_by_symbol.items(), key=lambda item: item[0]):
@@ -287,6 +319,8 @@ def build_historical_market_data_payload(
         for index, row in clipped.iterrows():
             trade_date = _coerce_trade_date(index)
             if trade_date is None or trade_date > end_date:
+                continue
+            if trade_date < start_date:
                 continue
 
             close_price = float(row.get("close", 0.0))
@@ -311,128 +345,145 @@ def build_historical_market_data_payload(
     return payload, source, warnings
 
 
-def _fetch_symbol_ohlcv(
-    symbol: str,
+def _load_history_from_csv(
     as_of_date: date,
-    output_bars: int,
-    fetch_bars: int,
-    get_ohlcv_data: Callable[..., Any] | None = None,
-) -> pd.DataFrame:
-    resolved_loader = get_ohlcv_data or _resolve_get_ohlcv_callable()
-    if resolved_loader is None:
-        raise DataPipelineError("get_OHLCV_data not importable from egxpy")
+    n_bars: int,
+    warnings: list[str],
+) -> dict[str, pd.DataFrame]:
+    historical_dir = resolve_historical_data_dir()
+    if not historical_dir.exists():
+        raise DataPipelineError(
+            f"Historical CSV directory does not exist: {historical_dir}. Run data_seeder.py first."
+        )
 
-    # Required integration call shape from API reference.
-    raw = resolved_loader(symbol, EGX_EXCHANGE, EGX_INTERVAL, fetch_bars)
-    normalized = _normalize_ohlcv_frame(raw)
+    csv_files = sorted(historical_dir.glob("*.csv"))
+    if not csv_files:
+        raise DataPipelineError(
+            f"No CSV files found under {historical_dir}. Run data_seeder.py first."
+        )
 
-    if isinstance(normalized.index, pd.DatetimeIndex):
-        historical = normalized.loc[normalized.index.date <= as_of_date]
-    else:
-        historical = normalized
+    history_by_symbol: dict[str, pd.DataFrame] = {}
+    window_size = max(60, int(n_bars))
 
-    if historical.empty:
-        raise DataPipelineError(f"No historical rows available for {symbol} up to {as_of_date}")
-
-    return historical.tail(output_bars)
-
-
-@lru_cache(maxsize=1)
-def _resolve_get_ohlcv_callable() -> Callable[..., Any] | None:
-    module_candidates = ["egxpy", "egxpy.download", "egxpy.api", "egxpy.client"]
-    callable_candidates = ["get_OHLCV_data", "get_ohlcv_data"]
-
-    for module_name in module_candidates:
-        try:
-            module = importlib.import_module(module_name)
-        except Exception:  # noqa: BLE001
+    for csv_file in csv_files:
+        symbol, frame, warning = _read_history_csv(csv_file)
+        if warning:
+            warnings.append(warning)
+        if symbol is None or frame is None or frame.empty:
             continue
 
-        for callable_name in callable_candidates:
-            candidate = getattr(module, callable_name, None)
-            if callable(candidate):
-                return candidate
+        frame = frame.loc[frame.index.date <= as_of_date]
+        if frame.empty:
+            continue
 
-    return None
+        clipped = frame.sort_index().tail(window_size)
+        if clipped.empty:
+            continue
+
+        history_by_symbol[symbol] = clipped
+
+    missing_expected = [
+        symbol
+        for symbol in EGX30_CANONICAL_SYMBOLS
+        if symbol not in history_by_symbol
+    ]
+    if missing_expected:
+        warnings.append(
+            "Missing historical CSVs for symbols: " + ", ".join(missing_expected)
+        )
+
+    if not history_by_symbol:
+        raise DataPipelineError(
+            f"No usable historical CSV rows found under {historical_dir}."
+        )
+
+    LOGGER.info(
+        "Loaded local CSV history: symbols=%s directory=%s",
+        len(history_by_symbol),
+        historical_dir,
+    )
+
+    return history_by_symbol
+
+
+def _read_history_csv(csv_file: Path) -> tuple[str | None, pd.DataFrame | None, str | None]:
+    try:
+        raw = pd.read_csv(csv_file)
+    except Exception as exc:  # noqa: BLE001
+        return None, None, f"Failed to read {csv_file.name}: {exc}"
+
+    if raw.empty:
+        return None, None, f"Historical CSV {csv_file.name} is empty"
+
+    symbol = _resolve_symbol_from_frame(raw, csv_file)
+    if symbol is None:
+        return None, None, f"Could not resolve canonical symbol for {csv_file.name}"
+
+    column_map = {str(column).strip().lower(): column for column in raw.columns}
+    date_col = _pick_first_present(column_map, ["trade_date", "date", "datetime", "timestamp"])
+    open_col = _pick_first_present(column_map, ["open", "open_price", "o"])
+    high_col = _pick_first_present(column_map, ["high", "high_price", "h"])
+    low_col = _pick_first_present(column_map, ["low", "low_price", "l"])
+    close_col = _pick_first_present(column_map, ["close", "close_price", "adj_close", "c"])
+    volume_col = _pick_first_present(column_map, ["volume", "vol", "v"])
+
+    if date_col is None or close_col is None:
+        return None, None, f"Historical CSV {csv_file.name} must include date and close columns"
+
+    normalized = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(raw[date_col], errors="coerce"),
+            "close": pd.to_numeric(raw[close_col], errors="coerce"),
+            "open": pd.to_numeric(raw[open_col], errors="coerce") if open_col is not None else np.nan,
+            "high": pd.to_numeric(raw[high_col], errors="coerce") if high_col is not None else np.nan,
+            "low": pd.to_numeric(raw[low_col], errors="coerce") if low_col is not None else np.nan,
+            "volume": pd.to_numeric(raw[volume_col], errors="coerce") if volume_col is not None else np.nan,
+        }
+    )
+
+    normalized = normalized.dropna(subset=["trade_date", "close"])
+    if normalized.empty:
+        return None, None, f"Historical CSV {csv_file.name} has no valid trade_date/close rows"
+
+    normalized["open"] = normalized["open"].fillna(normalized["close"])
+    normalized["high"] = normalized["high"].fillna(normalized["close"])
+    normalized["low"] = normalized["low"].fillna(normalized["close"])
+    normalized["volume"] = normalized["volume"].fillna(0.0).clip(lower=0.0)
+
+    ohlc = normalized[["open", "high", "low", "close"]]
+    normalized["high"] = ohlc.max(axis=1)
+    normalized["low"] = ohlc.min(axis=1)
+
+    normalized = normalized.set_index("trade_date").sort_index()
+    normalized = normalized[~normalized.index.duplicated(keep="last")]
+
+    return symbol, normalized[["open", "high", "low", "close", "volume"]], None
+
+
+def _resolve_symbol_from_frame(raw: pd.DataFrame, csv_file: Path) -> str | None:
+    column_map = {str(column).strip().lower(): column for column in raw.columns}
+    symbol_col = _pick_first_present(column_map, ["symbol", "ticker", "code"])
+
+    if symbol_col is not None:
+        for raw_value in raw[symbol_col].dropna().tolist():
+            canonical = canonicalize_symbol(str(raw_value), allow_unmapped=False)
+            if canonical is not None:
+                return canonical
+
+    return canonicalize_symbol(csv_file.stem, allow_unmapped=False)
+
+
+def _resolve_sector(symbol: str) -> str:
+    base_symbol = to_base_symbol(symbol)
+    if base_symbol is None:
+        return "UNCLASSIFIED"
+
+    return DEFAULT_SECTOR_MAP.get(base_symbol, "UNCLASSIFIED")
 
 
 def _normalize_ohlcv_frame(raw: Any) -> pd.DataFrame:
-    if isinstance(raw, pd.DataFrame):
-        frame = raw.copy()
-    elif hasattr(raw, "to_dataframe"):
-        frame = raw.to_dataframe()
-    elif isinstance(raw, list):
-        frame = pd.DataFrame(raw)
-    else:
-        raise DataPipelineError("Unsupported OHLCV payload format")
-
-    if frame.empty:
-        raise DataPipelineError("Empty OHLCV payload")
-
-    cols = {str(col).strip().lower(): col for col in frame.columns}
-
-    date_col = _pick_first_present(cols, ["date", "datetime", "timestamp", "trade_date"])
-    open_col = _pick_first_present(cols, ["open", "open_price", "first"])
-    high_col = _pick_first_present(cols, ["high", "high_price", "max"])
-    low_col = _pick_first_present(cols, ["low", "low_price", "min"])
-    close_col = _pick_first_present(cols, ["close", "close_price", "adj_close", "last"])
-    volume_col = _pick_first_present(cols, ["volume", "vol", "traded_volume", "turnover_volume"])
-
-    if close_col is None:
-        raise DataPipelineError("OHLCV payload missing close column")
-
-    normalized = frame.copy()
-    if date_col is not None:
-        normalized["_date"] = pd.to_datetime(normalized[date_col], errors="coerce")
-        normalized = normalized.dropna(subset=["_date"]).set_index("_date")
-    elif normalized.index.name is None:
-        normalized.index = pd.date_range(end=pd.Timestamp.today(), periods=len(normalized), freq="B")
-
-    normalized_close = pd.to_numeric(normalized[close_col], errors="coerce")
-    if open_col is not None:
-        normalized_open = pd.to_numeric(normalized[open_col], errors="coerce")
-    else:
-        normalized_open = normalized_close
-
-    if high_col is not None:
-        normalized_high = pd.to_numeric(normalized[high_col], errors="coerce")
-    else:
-        normalized_high = normalized_close
-
-    if low_col is not None:
-        normalized_low = pd.to_numeric(normalized[low_col], errors="coerce")
-    else:
-        normalized_low = normalized_close
-
-    if volume_col is not None:
-        normalized_volume = pd.to_numeric(normalized[volume_col], errors="coerce")
-    else:
-        normalized_volume = pd.Series(200_000.0, index=normalized.index)
-
-    clean = pd.DataFrame(
-        {
-            "open": normalized_open,
-            "high": normalized_high,
-            "low": normalized_low,
-            "close": normalized_close,
-            "volume": normalized_volume,
-        },
-        index=normalized.index,
-    )
-    clean = clean.dropna(subset=["close"]).sort_index()
-    clean["open"] = clean["open"].fillna(clean["close"])
-    clean["high"] = clean["high"].fillna(clean["close"])
-    clean["low"] = clean["low"].fillna(clean["close"])
-
-    ohlc = clean[["open", "high", "low", "close"]]
-    clean["high"] = ohlc.max(axis=1)
-    clean["low"] = ohlc.min(axis=1)
-    clean["volume"] = clean["volume"].fillna(0.0).clip(lower=0.0)
-
-    if clean.empty:
-        raise DataPipelineError("No valid rows in OHLCV payload")
-
-    return clean
+    del raw
+    raise DataPipelineError("Live OHLCV normalization has been removed; local CSVs are required")
 
 
 def _pick_first_present(column_map: dict[str, Any], names: list[str]) -> Any:
@@ -462,52 +513,27 @@ def _build_price_volume_frames(history_by_symbol: dict[str, pd.DataFrame]) -> tu
     return prices, volumes
 
 
-def _mock_suspended_symbols(as_of_date: date) -> set[str]:
+def _mock_suspended_symbols(as_of_date: date, candidates: list[str] | None = None) -> set[str]:
+    if candidates is None:
+        candidates = list(EGX30_CANONICAL_SYMBOLS)
+
+    if not candidates:
+        return set()
+
     seed = int(as_of_date.strftime("%Y%m%d"))
     rng = random.Random(seed)
 
     if rng.random() < 0.35:
-        count = 1 if rng.random() < 0.75 else 2
-        return set(rng.sample(EGX30_SYMBOLS, k=count))
+        max_count = min(2, len(candidates))
+        count = 1 if max_count == 1 else (1 if rng.random() < 0.75 else max_count)
+        return set(rng.sample(candidates, k=count))
+
     return set()
 
 
 def _generate_mock_ohlcv(symbols: list[str], as_of_date: date, n_bars: int) -> dict[str, pd.DataFrame]:
-    index = pd.bdate_range(end=pd.Timestamp(as_of_date), periods=n_bars)
-    mock: dict[str, pd.DataFrame] = {}
-
-    for symbol in symbols:
-        cap_rank = DEFAULT_MARKET_CAP_RANK.get(symbol, 30)
-        rank_bias = max(1, min(cap_rank, 30)) / 30.0
-
-        seed = abs(hash((symbol, as_of_date.toordinal()))) % (2**32 - 1)
-        rng = np.random.default_rng(seed)
-
-        base_price = 10.0 + (1.0 - rank_bias) * 80.0
-        daily_mu = 0.0002 + (1.0 - rank_bias) * 0.0004
-        daily_sigma = 0.010 + rank_bias * 0.020
-
-        shocks = rng.normal(loc=daily_mu, scale=daily_sigma, size=n_bars)
-        close_prices = base_price * np.exp(np.cumsum(shocks))
-        open_prices = np.concatenate(([close_prices[0]], close_prices[:-1]))
-        intraday_spread = np.abs(rng.normal(loc=0.006, scale=0.003, size=n_bars))
-        high_prices = np.maximum(open_prices, close_prices) * (1.0 + intraday_spread)
-        low_prices = np.minimum(open_prices, close_prices) * (1.0 - intraday_spread)
-        volumes = rng.integers(low=150_000, high=5_000_000, size=n_bars)
-
-        mock[symbol] = pd.DataFrame(
-            {
-                "open": open_prices.astype(float),
-                "high": high_prices.astype(float),
-                "low": low_prices.astype(float),
-                "close": close_prices.astype(float),
-                "volume": volumes.astype(float),
-            },
-            index=index,
-        )
-
-    LOGGER.warning("Using synthetic OHLCV fallback for symbols: %s", ", ".join(symbols))
-    return mock
+    del symbols, as_of_date, n_bars
+    raise DataPipelineError("Synthetic OHLCV generation has been disabled; local CSVs are required")
 
 
 def _coerce_trade_date(index: Any) -> date | None:

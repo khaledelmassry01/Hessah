@@ -48,7 +48,6 @@ public class PortfolioService {
     private static final int SYMBOL_MAX_LENGTH = 16;
     private static final String EGX_SUFFIX = ".CA";
     private static final String DEFAULT_SECTOR_CODE = "FIN_SERV";
-    private static final BigDecimal FALLBACK_LAST_PRICE = new BigDecimal("1.0000");
     private static final BigDecimal FEE_MULTIPLIER = new BigDecimal("0.995");
 
     private final WalletService walletService;
@@ -164,7 +163,11 @@ public class PortfolioService {
                     allocationResult.executions()
             );
 
-            if ("PARTIAL".equals(aiStatus)) {
+            boolean hasUnpricedAllocations = allocationResult.executions().stream()
+                    .anyMatch(execution -> execution.getPriceSnapshot() == null
+                            || execution.getPriceSnapshot().compareTo(BigDecimal.ZERO) <= 0);
+
+            if ("PARTIAL".equals(aiStatus) || hasUnpricedAllocations) {
                 portfolioRun.setRunStatus(PortfolioRunStatus.PARTIAL);
             } else {
                 portfolioRun.setRunStatus(PortfolioRunStatus.COMPLETED);
@@ -259,12 +262,6 @@ public class PortfolioService {
             }
 
             StockInstrument stock = resolveInstrumentForAllocation(item.getSymbol());
-
-            if (stock.getLastPrice() == null || stock.getLastPrice().compareTo(BigDecimal.ZERO) <= 0) {
-                stock.setLastPrice(FALLBACK_LAST_PRICE);
-                stock.setUpdatedAt(LocalDateTime.now());
-                stock = stockInstrumentRepository.save(stock);
-            }
 
             if (Boolean.TRUE.equals(stock.getIsSuspended())) {
                 throw new IllegalStateException("AI response contains suspended stock: " + stock.getSymbol());

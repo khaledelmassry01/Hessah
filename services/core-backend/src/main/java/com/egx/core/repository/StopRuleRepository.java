@@ -1,9 +1,10 @@
 package com.egx.core.repository;
 
-import com.egx.core.domain.StopRule;
+import java.util.List;
+
 import org.springframework.data.jpa.repository.JpaRepository;
 
-import java.util.List;
+import com.egx.core.domain.StopRule;
 
 public interface StopRuleRepository extends JpaRepository<StopRule, Long> {
     List<StopRule> findByIsActiveTrue();

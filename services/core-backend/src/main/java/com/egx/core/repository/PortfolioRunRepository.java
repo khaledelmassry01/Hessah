@@ -1,10 +1,12 @@
 package com.egx.core.repository;
 
-import com.egx.core.domain.PortfolioRun;
-import com.egx.core.domain.enums.PortfolioRunStatus;
+import java.util.Collection;
+import java.util.Optional;
+
 import org.springframework.data.jpa.repository.JpaRepository;
 
-import java.util.Optional;
+import com.egx.core.domain.PortfolioRun;
+import com.egx.core.domain.enums.PortfolioRunStatus;
 
 public interface PortfolioRunRepository extends JpaRepository<PortfolioRun, Long> {
     Optional<PortfolioRun> findByRequestUuid(String requestUuid);
@@ -13,8 +15,8 @@ public interface PortfolioRunRepository extends JpaRepository<PortfolioRun, Long
 
     Optional<PortfolioRun> findTopByUserIdOrderByGeneratedAtDescIdDesc(Long userId);
 
-    Optional<PortfolioRun> findFirstByUserIdAndRunStatusOrderByGeneratedAtDescIdDesc(
+    Optional<PortfolioRun> findFirstByUserIdAndRunStatusInOrderByGeneratedAtDescIdDesc(
             Long userId,
-            PortfolioRunStatus runStatus
+            Collection<PortfolioRunStatus> runStatuses
     );
 }

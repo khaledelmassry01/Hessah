@@ -1,14 +1,5 @@
 package com.egx.core.service;
 
-import com.egx.core.domain.AllocationExecution;
-import com.egx.core.domain.MarketDailyBar;
-import com.egx.core.domain.PortfolioTarget;
-import com.egx.core.domain.enums.SettlementStatus;
-import com.egx.core.repository.AllocationExecutionRepository;
-import com.egx.core.repository.MarketDailyBarRepository;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
@@ -16,23 +7,38 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.egx.core.domain.AllocationExecution;
+import com.egx.core.domain.MarketDailyBar;
+import com.egx.core.domain.PortfolioTarget;
+import com.egx.core.domain.StockInstrument;
+import com.egx.core.domain.enums.SettlementStatus;
+import com.egx.core.repository.AllocationExecutionRepository;
+import com.egx.core.repository.MarketDailyBarRepository;
+import com.egx.core.repository.StockInstrumentRepository;
+
 @Service
 public class AllocationService {
 
     private static final int CURRENCY_SCALE = 4;
-    private static final BigDecimal FALLBACK_PRICE_EGP = new BigDecimal("100.0000");
+    private static final BigDecimal ZERO_MONEY = BigDecimal.ZERO.setScale(CURRENCY_SCALE, RoundingMode.HALF_DOWN);
 
     private final AllocationExecutionRepository allocationExecutionRepository;
     private final MarketDailyBarRepository marketDailyBarRepository;
+    private final StockInstrumentRepository stockInstrumentRepository;
     private final WalletService walletService;
 
     public AllocationService(
             AllocationExecutionRepository allocationExecutionRepository,
             MarketDailyBarRepository marketDailyBarRepository,
+            StockInstrumentRepository stockInstrumentRepository,
             WalletService walletService
     ) {
         this.allocationExecutionRepository = allocationExecutionRepository;
         this.marketDailyBarRepository = marketDailyBarRepository;
+        this.stockInstrumentRepository = stockInstrumentRepository;
         this.walletService = walletService;
     }
 
@@ -44,31 +50,30 @@ public class AllocationService {
             List<PortfolioTarget> targets
     ) {
         BigDecimal normalizedInvestable = money(investableBudget);
-        BigDecimal executedTotal = BigDecimal.ZERO.setScale(CURRENCY_SCALE, RoundingMode.HALF_DOWN);
+        BigDecimal executedTotal = ZERO_MONEY;
         LocalDate settlementDate = addBusinessDays(LocalDate.now(), 2);
 
         List<AllocationExecution> executions = new ArrayList<>();
         for (PortfolioTarget target : targets) {
-            MarketDailyBar latestBar = marketDailyBarRepository
-                .findTopByStockIdOrderByTradeDateDesc(target.getStockId())
-                .orElse(null);
-
-            BigDecimal priceSnapshot = latestBar == null
-                ? FALLBACK_PRICE_EGP
-                : money(latestBar.getClosePrice());
-            if (priceSnapshot.compareTo(BigDecimal.ZERO) <= 0) {
-            priceSnapshot = FALLBACK_PRICE_EGP;
-            }
-
             BigDecimal targetAmount = money(target.getTargetAmountEgp());
-            BigDecimal exactShares = targetAmount.divide(priceSnapshot, 10, RoundingMode.HALF_DOWN);
-            BigDecimal flooredShares = exactShares.setScale(0, RoundingMode.FLOOR);
-            long wholeShares = flooredShares.longValue();
+            BigDecimal executablePrice = resolveExecutablePrice(target.getStockId());
 
-            BigDecimal executedAmount = money(priceSnapshot.multiply(BigDecimal.valueOf(wholeShares)));
-            BigDecimal residualComponent = money(targetAmount.subtract(executedAmount));
-            if (residualComponent.compareTo(BigDecimal.ZERO) < 0) {
-                residualComponent = BigDecimal.ZERO.setScale(CURRENCY_SCALE, RoundingMode.HALF_DOWN);
+            BigDecimal priceSnapshot = ZERO_MONEY;
+            long wholeShares = 0L;
+            BigDecimal executedAmount = ZERO_MONEY;
+            BigDecimal residualComponent = targetAmount;
+
+            if (executablePrice != null) {
+                priceSnapshot = money(executablePrice);
+                BigDecimal exactShares = targetAmount.divide(priceSnapshot, 10, RoundingMode.HALF_DOWN);
+                BigDecimal flooredShares = exactShares.setScale(0, RoundingMode.FLOOR);
+                wholeShares = flooredShares.longValue();
+
+                executedAmount = money(priceSnapshot.multiply(BigDecimal.valueOf(wholeShares)));
+                residualComponent = money(targetAmount.subtract(executedAmount));
+                if (residualComponent.compareTo(BigDecimal.ZERO) < 0) {
+                    residualComponent = ZERO_MONEY;
+                }
             }
 
             AllocationExecution execution = new AllocationExecution();
@@ -91,11 +96,37 @@ public class AllocationService {
 
         BigDecimal residualTotal = money(normalizedInvestable.subtract(executedTotal));
         if (residualTotal.compareTo(BigDecimal.ZERO) < 0) {
-            residualTotal = BigDecimal.ZERO.setScale(CURRENCY_SCALE, RoundingMode.HALF_DOWN);
+            residualTotal = ZERO_MONEY;
         }
 
         BigDecimal creditedResidual = walletService.creditResidual(userId, residualTotal, portfolioRunId);
         return new AllocationResult(savedExecutions, creditedResidual);
+    }
+
+    private BigDecimal resolveExecutablePrice(Long stockId) {
+        BigDecimal marketClose = marketDailyBarRepository
+                .findTopByStockIdOrderByTradeDateDesc(stockId)
+                .map(MarketDailyBar::getClosePrice)
+                .map(this::normalizePositivePrice)
+                .orElse(null);
+
+        if (marketClose != null) {
+            return marketClose;
+        }
+
+        return stockInstrumentRepository
+                .findById(stockId)
+                .map(StockInstrument::getLastPrice)
+                .map(this::normalizePositivePrice)
+                .orElse(null);
+    }
+
+    private BigDecimal normalizePositivePrice(BigDecimal value) {
+        if (value == null || value.compareTo(BigDecimal.ZERO) <= 0) {
+            return null;
+        }
+
+        return money(value);
     }
 
     private LocalDate addBusinessDays(LocalDate from, int businessDays) {

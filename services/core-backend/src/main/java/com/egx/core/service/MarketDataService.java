@@ -2,6 +2,7 @@ package com.egx.core.service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.net.URI;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -12,14 +13,21 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import com.egx.core.domain.MarketDailyBar;
 import com.egx.core.domain.StockInstrument;
 import com.egx.core.repository.MarketDailyBarRepository;
 import com.egx.core.repository.StockInstrumentRepository;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Service
 public class MarketDataService {
@@ -27,19 +35,67 @@ public class MarketDataService {
     private static final int SYMBOL_MAX_LENGTH = 16;
     private static final int DB_TRANSACTION_BATCH_SIZE = 1000;
     private static final String EGX_SUFFIX = ".CA";
+    private static final String DEFAULT_FMP_API_KEY = "8ID9U3FQCVXMxIJms5jmQxRtQMUBl4aV";
+    private static final String DEFAULT_FMP_BASE_URL = "https://financialmodelingprep.com";
+
+    // Hardcoded symbol mapping to guarantee 1:1 compatibility with stock_instruments.
+    private static final Map<String, String> CANONICAL_TO_FMP_SYMBOL = Map.ofEntries(
+            Map.entry("COMI.CA", "COMI.CA"),
+            Map.entry("HRHO.CA", "HRHO.CA"),
+            Map.entry("SWDY.CA", "SWDY.CA"),
+            Map.entry("ETEL.CA", "ETEL.CA"),
+            Map.entry("EFIH.CA", "EFIH.CA"),
+            Map.entry("ABUK.CA", "ABUK.CA"),
+            Map.entry("FWRY.CA", "FWRY.CA"),
+            Map.entry("PHDC.CA", "PHDC.CA"),
+            Map.entry("TMGH.CA", "TMGH.CA"),
+            Map.entry("ORWE.CA", "ORWE.CA"),
+            Map.entry("EAST.CA", "EAST.CA"),
+            Map.entry("AMOC.CA", "AMOC.CA"),
+            Map.entry("MFPC.CA", "MFPC.CA"),
+            Map.entry("SKPC.CA", "SKPC.CA"),
+            Map.entry("CCAP.CA", "CCAP.CA"),
+            Map.entry("HELI.CA", "HELI.CA"),
+            Map.entry("ORAS.CA", "ORAS.CA"),
+            Map.entry("EKHO.CA", "EKHO.CA"),
+            Map.entry("MICH.CA", "MICH.CA"),
+            Map.entry("ALCN.CA", "ALCN.CA"),
+            Map.entry("ORHD.CA", "ORHD.CA"),
+            Map.entry("JUFO.CA", "JUFO.CA"),
+            Map.entry("DOMT.CA", "DOMT.CA"),
+            Map.entry("GDWA.CA", "GDWA.CA"),
+            Map.entry("CIEB.CA", "CIEB.CA"),
+            Map.entry("AUTO.CA", "AUTO.CA"),
+            Map.entry("BTFH.CA", "BTFH.CA"),
+            Map.entry("OBRI.CA", "OBRI.CA"),
+            Map.entry("RAYA.CA", "RAYA.CA"),
+            Map.entry("CLHO.CA", "CLHO.CA")
+    );
 
     private final StockInstrumentRepository stockInstrumentRepository;
     private final MarketDailyBarRepository marketDailyBarRepository;
     private final TransactionTemplate transactionTemplate;
+    private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper;
+    private final String fmpApiKey;
+    private final String fmpBaseUrl;
 
     public MarketDataService(
             StockInstrumentRepository stockInstrumentRepository,
             MarketDailyBarRepository marketDailyBarRepository,
-            PlatformTransactionManager transactionManager
+            PlatformTransactionManager transactionManager,
+            RestTemplate restTemplate,
+            ObjectMapper objectMapper,
+            @Value("${fmp.api-key:" + DEFAULT_FMP_API_KEY + "}") String fmpApiKey,
+            @Value("${fmp.base-url:" + DEFAULT_FMP_BASE_URL + "}") String fmpBaseUrl
     ) {
         this.stockInstrumentRepository = stockInstrumentRepository;
         this.marketDailyBarRepository = marketDailyBarRepository;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.restTemplate = restTemplate;
+        this.objectMapper = objectMapper;
+        this.fmpApiKey = fmpApiKey;
+        this.fmpBaseUrl = fmpBaseUrl;
     }
 
     public BulkUpsertResult bulkUpsert(List<MarketDataUpsertCommand> commands) {
@@ -80,6 +136,152 @@ public class MarketDataService {
         }
 
         return new BulkUpsertResult(commands.size(), inserted, updated, skipped, unknownSymbols);
+    }
+
+    public LatestSnapshotResult refreshLatestCloseSnapshot() {
+        if (fmpApiKey == null || fmpApiKey.isBlank()) {
+            throw new IllegalStateException("FMP API key is missing");
+        }
+
+        List<StockInstrument> instruments = stockInstrumentRepository.findByIsSuspendedFalse();
+        if (instruments == null || instruments.isEmpty()) {
+            instruments = stockInstrumentRepository.findAll();
+        }
+
+        int requested = 0;
+        int updated = 0;
+        int missingPrice = 0;
+        int unknownSymbols = 0;
+        int failedRequests = 0;
+        List<String> warnings = new ArrayList<>();
+
+        List<StockInstrument> updatedStocks = new ArrayList<>();
+
+        for (StockInstrument stock : instruments) {
+            String canonicalSymbol = normalizeSymbol(stock.getSymbol());
+            if (canonicalSymbol == null) {
+                unknownSymbols++;
+                continue;
+            }
+
+            requested++;
+            String fmpSymbol = CANONICAL_TO_FMP_SYMBOL.get(canonicalSymbol);
+            if (fmpSymbol == null || fmpSymbol.isBlank()) {
+                unknownSymbols++;
+                warnings.add("Missing FMP mapping for symbol " + canonicalSymbol);
+                continue;
+            }
+
+            try {
+                BigDecimal closePrice = fetchLatestClosePrice(fmpSymbol);
+                if (closePrice == null || closePrice.compareTo(BigDecimal.ZERO) <= 0) {
+                    missingPrice++;
+                    continue;
+                }
+
+                if (!canonicalSymbol.equals(stock.getSymbol())) {
+                    stock.setSymbol(canonicalSymbol);
+                }
+                stock.setLastPrice(closePrice.setScale(4, RoundingMode.HALF_DOWN));
+                stock.setUpdatedAt(LocalDateTime.now());
+                updatedStocks.add(stock);
+                updated++;
+            } catch (Exception ex) {
+                failedRequests++;
+                if (warnings.size() < 12) {
+                    warnings.add("FMP request failed for " + fmpSymbol + ": " + ex.getMessage());
+                }
+            }
+        }
+
+        if (!updatedStocks.isEmpty()) {
+            stockInstrumentRepository.saveAll(updatedStocks);
+        }
+
+        return new LatestSnapshotResult(
+                requested,
+                updated,
+                missingPrice,
+                unknownSymbols,
+                failedRequests,
+                List.copyOf(warnings)
+        );
+    }
+
+    private BigDecimal fetchLatestClosePrice(String fmpSymbol) throws Exception {
+        URI uri = UriComponentsBuilder
+                .fromHttpUrl(resolveFmpBaseUrl())
+                .path("/api/v3/quote/{symbol}")
+                .queryParam("apikey", fmpApiKey)
+                .buildAndExpand(fmpSymbol)
+                .encode()
+                .toUri();
+
+        ResponseEntity<String> response;
+        try {
+            response = restTemplate.getForEntity(uri, String.class);
+        } catch (RestClientException ex) {
+            throw new RuntimeException("HTTP call failed", ex);
+        }
+
+        if (!response.getStatusCode().is2xxSuccessful()) {
+            throw new RuntimeException("HTTP status " + response.getStatusCode().value());
+        }
+
+        String body = response.getBody();
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+
+        JsonNode root = objectMapper.readTree(body);
+        JsonNode quoteNode = root;
+        if (root.isArray()) {
+            if (root.size() == 0) {
+                return null;
+            }
+            quoteNode = root.get(0);
+        }
+
+        if (quoteNode == null || quoteNode.isNull()) {
+            return null;
+        }
+
+        BigDecimal price = asPositiveDecimal(quoteNode.get("price"));
+        if (price != null) {
+            return price;
+        }
+
+        return asPositiveDecimal(quoteNode.get("previousClose"));
+    }
+
+    private String resolveFmpBaseUrl() {
+        String baseUrl = (fmpBaseUrl == null || fmpBaseUrl.isBlank()) ? DEFAULT_FMP_BASE_URL : fmpBaseUrl;
+        return baseUrl.replaceAll("/+$", "");
+    }
+
+    private BigDecimal asPositiveDecimal(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+
+        BigDecimal value;
+        if (node.isNumber()) {
+            value = node.decimalValue();
+        } else if (node.isTextual()) {
+            try {
+                value = new BigDecimal(node.asText().trim());
+            } catch (NumberFormatException ex) {
+                return null;
+            }
+        } else {
+            return null;
+        }
+
+        if (value.compareTo(BigDecimal.ZERO) <= 0) {
+            return null;
+        }
+
+        return value;
     }
 
     private BulkUpsertResult upsertChunk(List<NormalizedMarketData> chunk) {
@@ -338,6 +540,16 @@ public class MarketDataService {
     }
 
     public record BulkUpsertResult(int received, int inserted, int updated, int skipped, int unknownSymbols) {
+    }
+
+    public record LatestSnapshotResult(
+            int requested,
+            int updated,
+            int missingPrice,
+            int unknownSymbols,
+            int failedRequests,
+            List<String> warnings
+    ) {
     }
 
     private record NormalizedMarketData(

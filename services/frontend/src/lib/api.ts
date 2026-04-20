@@ -293,7 +293,7 @@ const ApiContracts = {
   authRegister: "/auth/register",
   instrumentsReadModel: "/instruments",
   walletReadModel: (userId: number) => `/wallets/${userId}`,
-  portfolioReadModel: (userId: number) => `/users/${userId}/portfolio/latest`,
+  portfolioReadModel: (_userId: number) => "/users/me/portfolio/latest",
   portfolioGenerate: "/portfolio/generate",
   portfolioRebalance: "/portfolio/allocate",
   aiPerformanceSummary: "/ai/performance-summary",
@@ -641,11 +641,7 @@ export async function revokeOtherSessions() {
 }
 
 export async function fetchInstruments(): Promise<InstrumentSummary[]> {
-  const data = await requestCandidates<unknown>([
-    async () => (await apiClient.get(ApiContracts.instrumentsReadModel)).data,
-    async () => (await apiClient.get("/market-data/instruments")).data,
-    async () => (await apiClient.get("/premium/market-watch")).data,
-  ]);
+  const { data } = await apiClient.get(ApiContracts.instrumentsReadModel);
 
   return normalizeInstruments(data);
 }
@@ -748,11 +744,7 @@ export async function fetchAiPerformanceSummary(
 
 export async function fetchStopRules(): Promise<StopRule[]> {
   try {
-    const data = await requestCandidates<unknown>([
-      async () => (await apiClient.get("/premium/stop-rules")).data,
-      async () => (await apiClient.get("/stop-rules")).data,
-      async () => (await apiClient.get("/premium/market-watch")).data,
-    ]);
+    const { data } = await apiClient.get("/premium/stop-rules");
 
     if (!Array.isArray(data)) {
       return [];

@@ -137,8 +137,34 @@ public class PortfolioController {
         assertOwnership(authenticatedUserId, userId);
 
         PortfolioRun run = portfolioRunRepository
-            .findFirstByUserIdAndRunStatusOrderByGeneratedAtDescIdDesc(userId, PortfolioRunStatus.COMPLETED)
+            .findFirstByUserIdAndRunStatusInOrderByGeneratedAtDescIdDesc(
+                    userId,
+                    List.of(PortfolioRunStatus.COMPLETED, PortfolioRunStatus.PARTIAL)
+            )
             .orElse(null);
+
+        if (run == null) {
+            return emptyPortfolioResponse();
+        }
+
+        return mapStoredPortfolio(run, authenticatedUserId);
+    }
+
+    @GetMapping({
+            "/users/me/portfolio/latest",
+            "/api/core/users/me/portfolio/latest",
+            "/users/me/portfolio",
+            "/api/core/users/me/portfolio"
+    })
+    public PortfolioResponse getLatestPortfolioForAuthenticatedUser(Authentication authentication) {
+        Long authenticatedUserId = resolveUserId(authentication);
+
+        PortfolioRun run = portfolioRunRepository
+                .findFirstByUserIdAndRunStatusInOrderByGeneratedAtDescIdDesc(
+                        authenticatedUserId,
+                        List.of(PortfolioRunStatus.COMPLETED, PortfolioRunStatus.PARTIAL)
+                )
+                .orElse(null);
 
         if (run == null) {
             return emptyPortfolioResponse();
