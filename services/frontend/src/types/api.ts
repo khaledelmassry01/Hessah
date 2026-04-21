@@ -91,6 +91,14 @@ export interface RejectedSymbol {
   reason: string;
 }
 
+export interface PortfolioRecommendation {
+  symbol?: string;
+  action?: string;
+  reason?: string;
+  predictedReturn5d?: number;
+  confidenceScore?: number;
+}
+
 export interface PortfolioResult {
   portfolioRunId?: number;
   status?: string;
@@ -100,7 +108,11 @@ export interface PortfolioResult {
   residualReturned?: number;
   expectedReturn?: number;
   expectedVolatility?: number;
+  predictedReturn?: number;
+  confidenceScore?: number;
+  modelAccuracy?: number;
   modelVersion?: string;
+  recommendations?: PortfolioRecommendation[];
   allocations: PortfolioAllocation[];
   warnings?: string[];
   rejectedSymbols?: RejectedSymbol[];

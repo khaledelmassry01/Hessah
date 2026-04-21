@@ -1,6 +1,7 @@
 import os
 import uuid
 import logging
+import threading
 from datetime import date
 
 import numpy as np
@@ -15,25 +16,79 @@ from .contracts import (
     ConstraintBlock,
     PredictRequest,
     PredictResponse,
+    RecommendationItem,
     RejectedSymbol,
 )
 from .data_pipeline import DataPipelineError, canonicalize_symbol, load_market_dataset
 from .historical_ingestion import ingest_historical_market_data_to_core
 from .instrument_sync import fetch_core_instrument_catalog, sync_live_instruments_to_core
+from .model_training import predict_symbol_forecasts, train_models_with_retry
 from .optimizer import optimize_max_sharpe
 
 app = FastAPI(title="EGX AI Engine", version="0.0.1")
 LOGGER = logging.getLogger(__name__)
-MODEL_VERSION = "mpt-egx30-v3"
+MODEL_VERSION = "xgb-egx30-v1"
 DEFAULT_RETRAIN_BUDGET_EGP = 500_000.0
 DEFAULT_RETRAIN_LOOKBACK_BUSINESS_DAYS = 252
 DEFAULT_RETRAIN_RISK_LEVEL = "HIGH"
 DEFAULT_RETRAIN_TIER = "PREMIUM"
+TRADING_DAYS_PER_YEAR = 252.0
+FORECAST_HORIZON_DAYS = 5.0
+PREVENTIVE_SELL_THRESHOLD_5D = -0.10
+
+TRAINING_STATE_LOCK = threading.Lock()
+LATEST_TRAINING_SUMMARY: dict[str, object] = {}
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "UP"}
+
+
+@app.on_event("startup")
+def startup_training() -> None:
+    if not _resolve_env_bool("AI_AUTO_TRAIN_ON_STARTUP", True):
+        LOGGER.info("ML auto-training is disabled by AI_AUTO_TRAIN_ON_STARTUP")
+        return
+
+    attempts = int(_resolve_env_float("AI_AUTO_TRAIN_ATTEMPTS", 5.0, minimum=1.0))
+    delay_seconds = _resolve_env_float("AI_AUTO_TRAIN_RETRY_DELAY_SECONDS", 20.0, minimum=1.0)
+
+    thread = threading.Thread(
+        target=_run_startup_training,
+        kwargs={"attempts": attempts, "delay_seconds": delay_seconds},
+        daemon=True,
+    )
+    thread.start()
+
+
+@app.post("/models/train")
+def train_models_now(
+    attempts: int = 3,
+    delay_seconds: float = 15.0,
+    target_mode: str = "RETURN_PCT",
+) -> dict[str, object]:
+    summary = _train_ml_models(
+        reason="manual-endpoint",
+        attempts=max(1, attempts),
+        delay_seconds=max(1.0, float(delay_seconds)),
+        target_mode=target_mode,
+    )
+    return {
+        "status": "SUCCESS",
+        "summary": summary,
+    }
+
+
+@app.get("/models/status")
+def model_training_status() -> dict[str, object]:
+    with TRAINING_STATE_LOCK:
+        snapshot = dict(LATEST_TRAINING_SUMMARY)
+
+    return {
+        "status": "READY" if snapshot else "UNAVAILABLE",
+        "latestTraining": snapshot,
+    }
 
 
 @app.get("/instruments/sync")
@@ -52,7 +107,11 @@ def sync_instruments() -> dict[str, object]:
 
 
 @app.post("/historical/ingest")
-def ingest_historical_data(years: int = 10, trigger_backtest: bool = True) -> dict[str, object]:
+def ingest_historical_data(
+    years: int = 10,
+    trigger_backtest: bool = True,
+    trigger_training: bool = True,
+) -> dict[str, object]:
     if years < 1 or years > 10:
         raise HTTPException(status_code=400, detail="years must be between 1 and 10")
 
@@ -60,6 +119,18 @@ def ingest_historical_data(years: int = 10, trigger_backtest: bool = True) -> di
         result = ingest_historical_market_data_to_core(years=years)
 
         warnings = list(result.get("warnings") or [])
+
+        if trigger_training:
+            if str(result.get("status") or "").upper() == "SUCCESS" and int(result.get("rowsSynced") or 0) > 0:
+                try:
+                    training_summary = _train_ml_models(reason="post-ingest", attempts=3, delay_seconds=15.0)
+                    result["mlTraining"] = training_summary
+                    result["modelAccuracy"] = training_summary.get("meanAccuracy", 0.0)
+                except Exception as training_exc:  # noqa: BLE001
+                    warnings.append(f"ML training failed: {training_exc}")
+            else:
+                warnings.append("ML training skipped because ingestion did not sync any market rows")
+
         if trigger_backtest:
             if str(result.get("status") or "").upper() == "SUCCESS" and int(result.get("rowsSynced") or 0) > 0:
                 backtest_result = _run_post_ingest_backtest_cycle()
@@ -223,9 +294,40 @@ def predict(payload: PredictRequest) -> PredictResponse:
 
         sector_to_indices = _build_sector_index_map(eligible_symbols, sectors)
 
+        ml_forecasts = predict_symbol_forecasts(
+            as_of_date=payload.as_of_date,
+            symbols=eligible_symbols,
+        )
+        warnings.extend(ml_forecasts.warnings)
+
+        annualization_factor = TRADING_DAYS_PER_YEAR / FORECAST_HORIZON_DAYS
+        symbol_predicted_return_5d: dict[str, float] = {}
+        symbol_confidence: dict[str, float] = {}
+        symbol_accuracy: dict[str, float] = {}
+        expected_returns_ml_annual: list[float] = []
+
+        for idx, symbol in enumerate(eligible_symbols):
+            fallback_return_annual = float(expected_returns[idx])
+            fallback_return_5d = fallback_return_annual / annualization_factor
+            forecast = ml_forecasts.forecasts.get(str(symbol).upper())
+
+            if forecast is None:
+                expected_returns_ml_annual.append(fallback_return_annual)
+                symbol_predicted_return_5d[symbol] = fallback_return_5d
+                symbol_confidence[symbol] = 0.0
+                symbol_accuracy[symbol] = float(ml_forecasts.model_accuracy)
+                continue
+
+            expected_returns_ml_annual.append(float(forecast.predicted_return_5d) * annualization_factor)
+            symbol_predicted_return_5d[symbol] = float(forecast.predicted_return_5d)
+            symbol_confidence[symbol] = float(forecast.confidence_score)
+            symbol_accuracy[symbol] = float(forecast.model_accuracy)
+
+        expected_returns_ml = np.array(expected_returns_ml_annual, dtype=float)
+
         optimization = optimize_max_sharpe(
             symbols=eligible_symbols,
-            expected_returns=expected_returns,
+            expected_returns=expected_returns_ml,
             covariance=covariance,
             bounds=bounds,
             sector_to_indices=sector_to_indices,
@@ -253,6 +355,36 @@ def predict(payload: PredictRequest) -> PredictResponse:
             for item in constraint_output.rejected_symbols
         ] + preflight_rejected
 
+        recommendations: list[RecommendationItem] = []
+        predicted_portfolio_return_5d = 0.0
+        weighted_confidence = 0.0
+        weighted_accuracy = 0.0
+
+        for symbol, weight in optimization.weights.items():
+            predicted_return_5d = float(symbol_predicted_return_5d.get(symbol, 0.0))
+            confidence = float(symbol_confidence.get(symbol, 0.0))
+            accuracy = float(symbol_accuracy.get(symbol, ml_forecasts.model_accuracy))
+
+            predicted_portfolio_return_5d += float(weight) * predicted_return_5d
+            weighted_confidence += float(weight) * confidence
+            weighted_accuracy += float(weight) * accuracy
+
+            if predicted_return_5d <= PREVENTIVE_SELL_THRESHOLD_5D:
+                recommendations.append(
+                    RecommendationItem(
+                        symbol=_canonical_symbol(symbol) or symbol,
+                        action="PREVENTIVE_SELL",
+                        reason="Model predicts >= 10% downside over next 5 trading days",
+                        predicted_return_5d=round(predicted_return_5d, 8),
+                        confidence_score=round(confidence, 6),
+                    )
+                )
+
+        if recommendations:
+            warnings.append(
+                f"{len(recommendations)} symbol(s) triggered PREVENTIVE_SELL due to predicted >=10% drop"
+            )
+
         status = "SUCCESS"
         if rejected_symbols or optimization.used_fallback or warnings:
             status = "PARTIAL"
@@ -264,6 +396,10 @@ def predict(payload: PredictRequest) -> PredictResponse:
             allocations=allocations,
             expected_return=round(optimization.expected_return, 8),
             expected_volatility=round(optimization.expected_volatility, 8),
+            predicted_return=round(predicted_portfolio_return_5d, 8),
+            confidence_score=round(float(np.clip(weighted_confidence, 0.0, 1.0)), 6),
+            model_accuracy=round(float(np.clip(weighted_accuracy, 0.0, 1.0)), 6),
+            recommendations=recommendations,
             rejected_symbols=rejected_symbols,
             warnings=warnings,
         )
@@ -390,6 +526,62 @@ def _resolve_enum_env(env_key: str, allowed_values: set[str], default_value: str
     if normalized in allowed_values:
         return normalized
     return default_value
+
+
+def _resolve_env_bool(env_key: str, default_value: bool) -> bool:
+    raw_value = os.getenv(env_key)
+    if raw_value is None:
+        return default_value
+
+    normalized = str(raw_value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default_value
+
+
+def _run_startup_training(attempts: int, delay_seconds: float) -> None:
+    try:
+        _train_ml_models(
+            reason="startup",
+            attempts=max(1, attempts),
+            delay_seconds=max(1.0, float(delay_seconds)),
+            target_mode=os.getenv("AI_TARGET_MODE", "RETURN_PCT"),
+        )
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Startup ML training failed")
+
+
+def _train_ml_models(
+    reason: str,
+    attempts: int,
+    delay_seconds: float,
+    target_mode: str | None = None,
+) -> dict[str, object]:
+    summary = train_models_with_retry(
+        attempts=max(1, attempts),
+        delay_seconds=max(1.0, float(delay_seconds)),
+        model_dir=os.getenv("AI_MODEL_DIR", "/app/models"),
+        target_mode=target_mode or os.getenv("AI_TARGET_MODE", "RETURN_PCT"),
+        horizon_days=int(_resolve_env_float("AI_FORECAST_HORIZON_DAYS", FORECAST_HORIZON_DAYS, minimum=1.0)),
+        min_rows_per_symbol=int(_resolve_env_float("AI_MIN_ROWS_PER_SYMBOL", 120.0, minimum=20.0)),
+    )
+
+    summary = dict(summary)
+    summary["trainingReason"] = reason
+
+    with TRAINING_STATE_LOCK:
+        LATEST_TRAINING_SUMMARY.clear()
+        LATEST_TRAINING_SUMMARY.update(summary)
+
+    LOGGER.info(
+        "ML models trained: reason=%s models=%s meanAccuracy=%.4f",
+        reason,
+        summary.get("modelCount"),
+        float(summary.get("meanAccuracy") or 0.0),
+    )
+    return summary
 
 
 def _dedupe_warnings(items: list[str]) -> list[str]:

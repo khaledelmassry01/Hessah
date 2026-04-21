@@ -41,6 +41,16 @@ class RejectedSymbol(BaseModel):
     reason: str
 
 
+class RecommendationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    action: Literal["PREVENTIVE_SELL", "SELL", "HOLD", "BUY"]
+    reason: str
+    predicted_return_5d: float
+    confidence_score: float = Field(ge=0.0, le=1.0)
+
+
 class PredictResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -50,6 +60,10 @@ class PredictResponse(BaseModel):
     allocations: list[AllocationItem]
     expected_return: float
     expected_volatility: float
+    predicted_return: float = 0.0
+    confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    model_accuracy: float = Field(default=0.0, ge=0.0, le=1.0)
+    recommendations: list[RecommendationItem] = Field(default_factory=list)
     rejected_symbols: list[RejectedSymbol] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 

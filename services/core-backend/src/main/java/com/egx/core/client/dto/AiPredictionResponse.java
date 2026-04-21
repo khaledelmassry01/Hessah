@@ -1,10 +1,10 @@
 package com.egx.core.client.dto;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 public class AiPredictionResponse {
 
@@ -22,7 +22,18 @@ public class AiPredictionResponse {
     @JsonProperty("expected_volatility")
     private BigDecimal expectedVolatility;
 
+    @JsonProperty("predicted_return")
+    private BigDecimal predictedReturn;
+
+    @JsonProperty("confidence_score")
+    private BigDecimal confidenceScore;
+
+    @JsonProperty("model_accuracy")
+    private BigDecimal modelAccuracy;
+
     private List<AiAllocationItem> allocations = new ArrayList<>();
+
+    private List<AiRecommendationItem> recommendations = new ArrayList<>();
 
     private List<String> warnings = new ArrayList<>();
 
@@ -66,12 +77,44 @@ public class AiPredictionResponse {
         this.expectedVolatility = expectedVolatility;
     }
 
+    public BigDecimal getPredictedReturn() {
+        return predictedReturn;
+    }
+
+    public void setPredictedReturn(BigDecimal predictedReturn) {
+        this.predictedReturn = predictedReturn;
+    }
+
+    public BigDecimal getConfidenceScore() {
+        return confidenceScore;
+    }
+
+    public void setConfidenceScore(BigDecimal confidenceScore) {
+        this.confidenceScore = confidenceScore;
+    }
+
+    public BigDecimal getModelAccuracy() {
+        return modelAccuracy;
+    }
+
+    public void setModelAccuracy(BigDecimal modelAccuracy) {
+        this.modelAccuracy = modelAccuracy;
+    }
+
     public List<AiAllocationItem> getAllocations() {
         return allocations;
     }
 
     public void setAllocations(List<AiAllocationItem> allocations) {
         this.allocations = allocations;
+    }
+
+    public List<AiRecommendationItem> getRecommendations() {
+        return recommendations;
+    }
+
+    public void setRecommendations(List<AiRecommendationItem> recommendations) {
+        this.recommendations = recommendations;
     }
 
     public List<String> getWarnings() {

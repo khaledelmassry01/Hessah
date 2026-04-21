@@ -9,5 +9,8 @@ pandas<2.2.0; python_version < "3.13"
 pandas>=2.2.3,<3.0.0; python_version >= "3.13"
 scipy==1.14.1; python_version < "3.13"
 scipy>=1.15.0,<2.0.0; python_version >= "3.13"
+xgboost==2.1.1
+scikit-learn==1.5.2; python_version < "3.13"
+mysql-connector-python==9.0.0
 yfinance==0.2.54
 git+https://github.com/egxlytics/egxpy.git

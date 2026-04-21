@@ -10,6 +10,7 @@ import type {
   GeneratePortfolioPayload,
   InstrumentSummary,
   PortfolioAllocation,
+  PortfolioRecommendation,
   PortfolioResult,
   RegisterPayload,
   RegisterResponse,
@@ -376,6 +377,26 @@ function normalizeAllocations(value: unknown): PortfolioAllocation[] {
     }));
 }
 
+function normalizePortfolioRecommendations(value: unknown): PortfolioRecommendation[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item) => isRecord(item))
+    .map((item) => ({
+      symbol: toStringValue(item.symbol),
+      action: toStringValue(item.action),
+      reason: toStringValue(item.reason),
+      predictedReturn5d:
+        toNumber(item.predictedReturn5d) ??
+        toNumber(item.predicted_return_5d),
+      confidenceScore:
+        toNumber(item.confidenceScore) ??
+        toNumber(item.confidence_score),
+    }));
+}
+
 function normalizePortfolioResult(raw: unknown): PortfolioResult {
   const data = isRecord(raw) ? raw : {};
 
@@ -398,7 +419,14 @@ function normalizePortfolioResult(raw: unknown): PortfolioResult {
     expectedReturn: toNumber(data.expectedReturn) ?? toNumber(data.expected_return),
     expectedVolatility:
       toNumber(data.expectedVolatility) ?? toNumber(data.expected_volatility),
+    predictedReturn:
+      toNumber(data.predictedReturn) ?? toNumber(data.predicted_return),
+    confidenceScore:
+      toNumber(data.confidenceScore) ?? toNumber(data.confidence_score),
+    modelAccuracy:
+      toNumber(data.modelAccuracy) ?? toNumber(data.model_accuracy),
     modelVersion: toStringValue(data.modelVersion) || toStringValue(data.model_version),
+    recommendations: normalizePortfolioRecommendations(data.recommendations),
     allocations:
       normalizeAllocations(data.allocations) ||
       normalizeAllocations(data.allocationExecutions),

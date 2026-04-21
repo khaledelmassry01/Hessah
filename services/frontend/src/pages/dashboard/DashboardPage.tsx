@@ -86,6 +86,18 @@ export function DashboardPage() {
     return ranked.find((entry) => typeof entry.accuracyScore === "number")?.accuracyScore;
   }, [performanceQuery.data]);
 
+  const portfolioModelAccuracy = portfolioQuery.data?.modelAccuracy;
+  const displayedModelAccuracy =
+    typeof portfolioModelAccuracy === "number" ? portfolioModelAccuracy : latestAccuracy;
+
+  const preventiveSellRecommendations = useMemo(
+    () =>
+      (portfolioQuery.data?.recommendations ?? []).filter(
+        (item) => item.action?.toUpperCase() === "PREVENTIVE_SELL",
+      ),
+    [portfolioQuery.data?.recommendations],
+  );
+
   const instruments = useMemo(
     () => [...(instrumentsQuery.data ?? [])].sort((a, b) => a.symbol.localeCompare(b.symbol)),
     [instrumentsQuery.data],
@@ -165,9 +177,9 @@ export function DashboardPage() {
         />
         <StatCard
           title="Model Accuracy"
-          value={formatPercent(latestAccuracy)}
-          subtitle="Latest AI prediction confidence"
-          trend={typeof latestAccuracy === "number" && latestAccuracy >= 0.7 ? "up" : undefined}
+          value={formatPercent(displayedModelAccuracy)}
+          subtitle="Current AI model accuracy score"
+          trend={typeof displayedModelAccuracy === "number" && displayedModelAccuracy >= 0.7 ? "up" : undefined}
           className="border-slate-700/70 bg-slate-950/80 text-slate-100"
         />
       </section>
@@ -204,9 +216,48 @@ export function DashboardPage() {
               <span className="text-slate-400">Expected Volatility</span>
               <span className="font-medium">{formatPercent(portfolioQuery.data?.expectedVolatility)}</span>
             </div>
+            <div className="flex items-center justify-between text-slate-300">
+              <span className="text-slate-400">Predicted Return (5D)</span>
+              <span className="font-medium">{formatSignedPercent(portfolioQuery.data?.predictedReturn)}</span>
+            </div>
+            <div className="flex items-center justify-between text-slate-300">
+              <span className="text-slate-400">Confidence Score</span>
+              <span className="font-medium">{formatPercent(portfolioQuery.data?.confidenceScore)}</span>
+            </div>
           </CardContent>
         </Card>
       </section>
+
+      {preventiveSellRecommendations.length > 0 ? (
+        <section>
+          <Card className="border-amber-400/40 bg-amber-500/10 text-amber-100">
+            <CardHeader>
+              <CardTitle>PREVENTIVE_SELL Recommendations</CardTitle>
+              <CardDescription className="text-amber-100/80">
+                AI model detected potential downside risk of at least 10% over the next 5 trading days.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {preventiveSellRecommendations.map((item, index) => (
+                <div
+                  key={`${item.symbol || "unknown"}-${index}`}
+                  className="rounded-md border border-amber-300/30 bg-slate-950/50 p-3 text-sm"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold">{item.symbol || "Unknown Symbol"}</span>
+                    <span className="text-amber-300">{item.action || "PREVENTIVE_SELL"}</span>
+                  </div>
+                  <div className="mt-1 text-amber-100/85">{item.reason || "Downside risk detected"}</div>
+                  <div className="mt-2 flex items-center justify-between text-xs text-amber-100/70">
+                    <span>Predicted Return (5D): {formatSignedPercent(item.predictedReturn5d)}</span>
+                    <span>Confidence: {formatPercent(item.confidenceScore)}</span>
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </section>
+      ) : null}
 
       <section>
         <Card className="border-slate-700/70 bg-slate-950/80 text-slate-100">

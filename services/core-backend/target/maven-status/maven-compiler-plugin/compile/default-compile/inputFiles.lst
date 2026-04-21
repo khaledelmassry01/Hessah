@@ -6,6 +6,7 @@ C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\client\dto\
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\client\dto\AiConstraintsPayload.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\client\dto\AiPredictionRequest.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\client\dto\AiPredictionResponse.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\client\dto\AiRecommendationItem.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\client\dto\AiRejectedSymbolItem.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\client\RestAiClient.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\config\OpenApiConfig.java

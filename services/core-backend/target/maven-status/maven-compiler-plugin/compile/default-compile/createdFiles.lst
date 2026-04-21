@@ -48,6 +48,7 @@ com\egx\core\domain\RebalanceAlert.class
 com\egx\core\domain\RiskProfile.class
 com\egx\core\domain\Subscription.class
 com\egx\core\service\AllocationService$AllocationResult.class
+com\egx\core\controller\PortfolioController$RecommendationResponse.class
 com\egx\core\security\JwtAuthFilter.class
 com\egx\core\domain\enums\OrderStatus.class
 com\egx\core\client\dto\AiPredictionResponse.class
@@ -83,6 +84,7 @@ com\egx\core\exception\InsufficientWalletBalanceException.class
 com\egx\core\service\PortfolioService.class
 com\egx\core\service\MarketDataService$LatestSnapshotResult.class
 com\egx\core\config\OpenApiConfig.class
+com\egx\core\client\dto\AiRecommendationItem.class
 com\egx\core\repository\TradeOrderRepository.class
 com\egx\core\domain\enums\KycStatus.class
 com\egx\core\controller\dto\auth\MessageResponse.class
@@ -125,6 +127,7 @@ com\egx\core\service\TearSheetService$TearSheetResponse.class
 com\egx\core\config\RestClientConfig.class
 com\egx\core\controller\PortfolioController$AllocationResponse.class
 com\egx\core\domain\SectorReference.class
+com\egx\core\controller\PortfolioController$AiResponseSnapshot.class
 com\egx\core\service\SessionService$SessionView.class
 com\egx\core\domain\TradeOrder.class
 com\egx\core\repository\UserSessionRepository.class

@@ -1,6 +1,8 @@
 package com.egx.core.controller;
 
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -21,11 +23,14 @@ import com.egx.core.domain.WalletLedgerEntry;
 import com.egx.core.domain.enums.LedgerEntryType;
 import com.egx.core.domain.enums.PortfolioRunStatus;
 import com.egx.core.domain.enums.RiskLevel;
+import com.egx.core.repository.AiPredictionAuditRepository;
 import com.egx.core.repository.AllocationExecutionRepository;
 import com.egx.core.repository.PortfolioRunRepository;
 import com.egx.core.repository.TradeOrderRepository;
 import com.egx.core.repository.WalletLedgerEntryRepository;
 import com.egx.core.service.PortfolioService;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.validation.constraints.Positive;
 
@@ -38,19 +43,25 @@ public class PortfolioController {
     private final AllocationExecutionRepository allocationExecutionRepository;
     private final TradeOrderRepository tradeOrderRepository;
     private final WalletLedgerEntryRepository walletLedgerEntryRepository;
+    private final AiPredictionAuditRepository aiPredictionAuditRepository;
+    private final ObjectMapper objectMapper;
 
     public PortfolioController(
             PortfolioService portfolioService,
             PortfolioRunRepository portfolioRunRepository,
             AllocationExecutionRepository allocationExecutionRepository,
             TradeOrderRepository tradeOrderRepository,
-            WalletLedgerEntryRepository walletLedgerEntryRepository
+            WalletLedgerEntryRepository walletLedgerEntryRepository,
+            AiPredictionAuditRepository aiPredictionAuditRepository,
+            ObjectMapper objectMapper
     ) {
         this.portfolioService = portfolioService;
         this.portfolioRunRepository = portfolioRunRepository;
         this.allocationExecutionRepository = allocationExecutionRepository;
         this.tradeOrderRepository = tradeOrderRepository;
         this.walletLedgerEntryRepository = walletLedgerEntryRepository;
+        this.aiPredictionAuditRepository = aiPredictionAuditRepository;
+        this.objectMapper = objectMapper;
     }
 
     @PostMapping({
@@ -184,6 +195,12 @@ public class PortfolioController {
                 BigDecimal.ZERO,
                 BigDecimal.ZERO,
                 null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                List.of(),
                 List.of(),
                 List.of()
         );
@@ -216,6 +233,8 @@ public class PortfolioController {
             BigDecimal feeBuffer,
             BigDecimal residualReturned
     ) {
+        AiResponseSnapshot aiSnapshot = loadAiResponseSnapshot(run.getId());
+
         List<AllocationResponse> allocationResponses = allocations.stream()
                 .map(allocation -> new AllocationResponse(
                         allocation.getStockId(),
@@ -249,9 +268,113 @@ public class PortfolioController {
                 run.getInvestableBudgetEgp(),
                 defaultMoney(residualReturned),
                 run.getModelVersion(),
+                aiSnapshot.expectedReturn(),
+                aiSnapshot.expectedVolatility(),
+                aiSnapshot.predictedReturn(),
+                aiSnapshot.confidenceScore(),
+                aiSnapshot.modelAccuracy(),
+                aiSnapshot.recommendations(),
                 allocationResponses,
                 orderResponses
         );
+    }
+
+    private AiResponseSnapshot loadAiResponseSnapshot(Long portfolioRunId) {
+        return aiPredictionAuditRepository
+                .findTopByPortfolioRunIdOrderByCreatedAtDesc(portfolioRunId)
+                .map(audit -> parseAiResponseSnapshot(audit.getResponseJson()))
+                .orElseGet(AiResponseSnapshot::empty);
+    }
+
+    private AiResponseSnapshot parseAiResponseSnapshot(String responseJson) {
+        if (responseJson == null || responseJson.isBlank()) {
+            return AiResponseSnapshot.empty();
+        }
+
+        try {
+            JsonNode root = objectMapper.readTree(responseJson);
+
+            return new AiResponseSnapshot(
+                    readDecimal(root, "expectedReturn", "expected_return"),
+                    readDecimal(root, "expectedVolatility", "expected_volatility"),
+                    readDecimal(root, "predictedReturn", "predicted_return"),
+                    readDecimal(root, "confidenceScore", "confidence_score"),
+                    readDecimal(root, "modelAccuracy", "model_accuracy"),
+                    readRecommendations(root)
+            );
+        } catch (IOException | RuntimeException ex) {
+            return AiResponseSnapshot.empty();
+        }
+    }
+
+    private List<RecommendationResponse> readRecommendations(JsonNode root) {
+        JsonNode items = root.get("recommendations");
+        if (items == null || !items.isArray()) {
+            return List.of();
+        }
+
+        List<RecommendationResponse> recommendations = new ArrayList<>();
+        for (JsonNode item : items) {
+            if (item == null || item.isNull()) {
+                continue;
+            }
+
+            recommendations.add(
+                    new RecommendationResponse(
+                            readText(item, "symbol"),
+                            readText(item, "action"),
+                            readText(item, "reason"),
+                            readDecimal(item, "predictedReturn5d", "predicted_return_5d"),
+                            readDecimal(item, "confidenceScore", "confidence_score")
+                    )
+            );
+        }
+
+        return recommendations;
+    }
+
+    private BigDecimal readDecimal(JsonNode node, String... keys) {
+        for (String key : keys) {
+            JsonNode valueNode = node.get(key);
+            if (valueNode == null || valueNode.isNull()) {
+                continue;
+            }
+
+            if (valueNode.isNumber()) {
+                return valueNode.decimalValue();
+            }
+
+            if (valueNode.isTextual()) {
+                String textValue = valueNode.asText().trim();
+                if (textValue.isEmpty()) {
+                    continue;
+                }
+
+                try {
+                    return new BigDecimal(textValue);
+                } catch (NumberFormatException ex) {
+                    return null;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private String readText(JsonNode node, String... keys) {
+        for (String key : keys) {
+            JsonNode valueNode = node.get(key);
+            if (valueNode == null || valueNode.isNull()) {
+                continue;
+            }
+
+            String value = valueNode.asText("").trim();
+            if (!value.isEmpty()) {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private BigDecimal sumLedgerEntries(Long portfolioRunId, LedgerEntryType entryType) {
@@ -387,10 +510,25 @@ public class PortfolioController {
             BigDecimal investableBudget,
             BigDecimal residualReturned,
             String modelVersion,
+            BigDecimal expectedReturn,
+            BigDecimal expectedVolatility,
+            BigDecimal predictedReturn,
+            BigDecimal confidenceScore,
+            BigDecimal modelAccuracy,
+            List<RecommendationResponse> recommendations,
             List<AllocationResponse> allocations,
             List<OrderResponse> orders
     ) {
     }
+
+        public record RecommendationResponse(
+            String symbol,
+            String action,
+            String reason,
+            BigDecimal predictedReturn5d,
+            BigDecimal confidenceScore
+        ) {
+        }
 
     public record AllocationResponse(
             Long stockId,
@@ -411,5 +549,18 @@ public class PortfolioController {
             String orderStatus,
             String settlementStatus
     ) {
+    }
+
+    private record AiResponseSnapshot(
+            BigDecimal expectedReturn,
+            BigDecimal expectedVolatility,
+            BigDecimal predictedReturn,
+            BigDecimal confidenceScore,
+            BigDecimal modelAccuracy,
+            List<RecommendationResponse> recommendations
+    ) {
+        private static AiResponseSnapshot empty() {
+            return new AiResponseSnapshot(null, null, null, null, null, List.of());
+        }
     }
 }
