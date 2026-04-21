@@ -49,6 +49,8 @@ public class PortfolioService {
     private static final String EGX_SUFFIX = ".CA";
     private static final String DEFAULT_SECTOR_CODE = "FIN_SERV";
     private static final BigDecimal FEE_MULTIPLIER = new BigDecimal("0.995");
+    private static final BigDecimal SMART_MAX_SECTOR_WEIGHT = new BigDecimal("0.30");
+    private static final BigDecimal SMART_MIN_CONFIDENCE_THRESHOLD = new BigDecimal("0.55");
 
     private final WalletService walletService;
     private final SubscriptionRepository subscriptionRepository;
@@ -59,6 +61,7 @@ public class PortfolioService {
     private final AiPredictionAuditRepository aiPredictionAuditRepository;
     private final AllocationService allocationService;
     private final OrderService orderService;
+    private final PortfolioOptimizer portfolioOptimizer;
     private final ObjectMapper objectMapper;
     private final SecurityAuditService securityAuditService;
 
@@ -72,6 +75,7 @@ public class PortfolioService {
             AiPredictionAuditRepository aiPredictionAuditRepository,
             AllocationService allocationService,
             OrderService orderService,
+            PortfolioOptimizer portfolioOptimizer,
             ObjectMapper objectMapper,
             SecurityAuditService securityAuditService
     ) {
@@ -84,6 +88,7 @@ public class PortfolioService {
         this.aiPredictionAuditRepository = aiPredictionAuditRepository;
         this.allocationService = allocationService;
         this.orderService = orderService;
+        this.portfolioOptimizer = portfolioOptimizer;
         this.objectMapper = objectMapper;
         this.securityAuditService = securityAuditService;
     }
@@ -147,6 +152,20 @@ public class PortfolioService {
                     walletService.creditResidual(userId, fee.investableBudget(), portfolioRun.getId());
                 }
                 throw new AiIntegrationException("AI engine returned FAILED status for request " + portfolioRun.getRequestUuid());
+            }
+
+            PortfolioOptimizer.OptimizationResult optimizationResult = portfolioOptimizer.optimize(
+                    aiResponse.getAllocations(),
+                    SMART_MAX_SECTOR_WEIGHT,
+                    SMART_MIN_CONFIDENCE_THRESHOLD
+            );
+            aiResponse.setAllocations(optimizationResult.allocations());
+            if (aiResponse.getWarnings() == null) {
+                aiResponse.setWarnings(new ArrayList<>());
+            }
+            aiResponse.getWarnings().addAll(optimizationResult.warnings());
+            if (optimizationResult.cashWeight().compareTo(BigDecimal.ZERO) > 0) {
+                aiStatus = "PARTIAL";
             }
 
             List<PortfolioTarget> targets = persistTargets(portfolioRun, fee.investableBudget(), aiResponse.getAllocations(), riskLevel);
@@ -235,9 +254,9 @@ public class PortfolioService {
     private AiConstraintsPayload buildConstraints(RiskLevel riskLevel) {
         AiConstraintsPayload constraints = new AiConstraintsPayload();
         constraints.setMaxSectorWeight(switch (riskLevel) {
-            case LOW -> new BigDecimal("0.40");
-            case MEDIUM -> new BigDecimal("0.40");
-            case HIGH -> new BigDecimal("0.40");
+            case LOW -> SMART_MAX_SECTOR_WEIGHT;
+            case MEDIUM -> SMART_MAX_SECTOR_WEIGHT;
+            case HIGH -> SMART_MAX_SECTOR_WEIGHT;
         });
         constraints.setMaxAdv30Participation(new BigDecimal("0.05"));
         constraints.setExcludeSuspended(true);
@@ -278,7 +297,7 @@ public class PortfolioService {
                 // Use the stock instrument sector to keep FK integrity with sector_reference.
                 target.setSectorCode(stock.getSectorCode());
             target.setConstraintFlagsJson(
-                    "{\"risk_level\":\"" + riskLevel.name() + "\",\"max_sector_weight\":0.40,\"max_adv30_participation\":0.05,\"exclude_suspended\":true}"
+                    "{\"risk_level\":\"" + riskLevel.name() + "\",\"max_sector_weight\":0.30,\"max_adv30_participation\":0.05,\"exclude_suspended\":true}"
             );
             targets.add(target);
         }

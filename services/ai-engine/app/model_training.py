@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from xgboost import XGBRegressor
+from xgboost import DMatrix, XGBRegressor
 
 from .feature_engineering import (
     FEATURE_COLUMNS,
@@ -35,6 +35,7 @@ DEFAULT_TRAIN_START = date(2016, 1, 1)
 DEFAULT_TRAIN_END = date(2024, 12, 31)
 DEFAULT_VALIDATION_START = date(2025, 1, 1)
 DEFAULT_VALIDATION_END = date(2026, 12, 31)
+RECENCY_WEIGHT_START = date(2024, 1, 1)
 MANIFEST_FILE_NAME = "model_manifest.json"
 
 _MODEL_CACHE_LOCK = threading.Lock()
@@ -140,15 +141,55 @@ def _compute_accuracy_score(y_true: np.ndarray, y_pred: np.ndarray, target_mode:
     return float(np.clip(1.0 - float(mape), 0.0, 1.0))
 
 
+def _build_recency_sample_weights(trade_dates: pd.Series) -> np.ndarray:
+    dates = pd.to_datetime(trade_dates, errors="coerce")
+    weights = np.ones(len(dates), dtype=float)
+
+    recent_mask = dates >= pd.Timestamp(RECENCY_WEIGHT_START)
+    weights[recent_mask] = 1.8
+
+    weights[dates >= pd.Timestamp(date(2025, 1, 1))] = 2.4
+    weights[dates >= pd.Timestamp(date(2026, 1, 1))] = 2.9
+    return weights
+
+
+def _estimate_tree_uncertainty_std(model: XGBRegressor, x_row: pd.DataFrame) -> float:
+    try:
+        booster = model.get_booster()
+        rounds = int(booster.num_boosted_rounds())
+        if rounds <= 1:
+            return 0.0
+
+        dmatrix = DMatrix(x_row)
+        per_tree_margins: list[float] = []
+        for idx in range(rounds):
+            margin = booster.predict(
+                dmatrix,
+                output_margin=True,
+                iteration_range=(idx, idx + 1),
+            )
+            if margin.size:
+                per_tree_margins.append(float(margin[0]))
+
+        if len(per_tree_margins) < 2:
+            return 0.0
+
+        return float(np.std(np.array(per_tree_margins, dtype=float)))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def train_xgboost_models(
     model_dir: str | Path | None = None,
     target_mode: str | None = None,
+    symbols: list[str] | None = None,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
     min_rows_per_symbol: int = DEFAULT_MIN_ROWS_PER_SYMBOL,
     train_start: date = DEFAULT_TRAIN_START,
     train_end: date = DEFAULT_TRAIN_END,
     validation_start: date = DEFAULT_VALIDATION_START,
     validation_end: date = DEFAULT_VALIDATION_END,
+    use_recency_weighting: bool = True,
 ) -> dict[str, Any]:
     if horizon_days < 1:
         raise ValueError("horizon_days must be >= 1")
@@ -159,7 +200,11 @@ def train_xgboost_models(
     model_root = _resolve_model_dir(model_dir)
     model_root.mkdir(parents=True, exist_ok=True)
 
-    raw = load_historical_market_data(start_date=train_start, end_date=validation_end)
+    raw = load_historical_market_data(
+        symbols=symbols,
+        start_date=train_start,
+        end_date=validation_end,
+    )
     features = build_feature_dataset(raw, horizon_days=horizon_days).frame
 
     if features.empty:
@@ -189,9 +234,12 @@ def train_xgboost_models(
 
         x_train = ordered.loc[train_mask, FEATURE_COLUMNS].astype(float)
         y_train = ordered.loc[train_mask, target_column].astype(float)
+        train_dates = ordered.loc[train_mask, "trade_date"]
 
         x_val = ordered.loc[val_mask, FEATURE_COLUMNS].astype(float)
         y_val = ordered.loc[val_mask, target_column].astype(float)
+
+        train_sample_weight = _build_recency_sample_weights(train_dates) if use_recency_weighting else None
 
         model = XGBRegressor(
             objective="reg:squarederror",
@@ -205,7 +253,7 @@ def train_xgboost_models(
             random_state=42,
             n_jobs=2,
         )
-        model.fit(x_train, y_train)
+        model.fit(x_train, y_train, sample_weight=train_sample_weight)
 
         y_true = y_val.to_numpy(dtype=float)
         y_pred = model.predict(x_val).astype(float)
@@ -214,6 +262,30 @@ def train_xgboost_models(
         mae = _mae(y_true, y_pred)
         r2 = _r2(y_true, y_pred)
         accuracy_score = _compute_accuracy_score(y_true, y_pred, resolved_target_mode)
+
+        fit_mask = (ordered["trade_date"] >= pd.Timestamp(train_start)) & (ordered["trade_date"] <= pd.Timestamp(validation_end))
+        fit_slice = ordered.loc[fit_mask].copy()
+        x_fit = fit_slice[FEATURE_COLUMNS].astype(float)
+        y_fit = fit_slice[target_column].astype(float)
+        fit_sample_weight = (
+            _build_recency_sample_weights(fit_slice["trade_date"])
+            if use_recency_weighting
+            else None
+        )
+
+        final_model = XGBRegressor(
+            objective="reg:squarederror",
+            n_estimators=380,
+            learning_rate=0.045,
+            max_depth=4,
+            min_child_weight=2,
+            subsample=0.90,
+            colsample_bytree=0.90,
+            reg_lambda=1.0,
+            random_state=42,
+            n_jobs=2,
+        )
+        final_model.fit(x_fit, y_fit, sample_weight=fit_sample_weight)
 
         payload = {
             "symbol": symbol,
@@ -228,8 +300,9 @@ def train_xgboost_models(
                 "accuracyScore": accuracy_score,
                 "trainRows": train_rows,
                 "validationRows": validation_rows,
+                "fitRows": int(len(fit_slice)),
             },
-            "model": model,
+            "model": final_model,
         }
 
         model_path = _model_path_for_symbol(model_root, symbol, resolved_target_mode)
@@ -245,6 +318,7 @@ def train_xgboost_models(
             "accuracyScore": accuracy_score,
             "trainRows": train_rows,
             "validationRows": validation_rows,
+            "fitRows": int(len(fit_slice)),
         }
 
     if trained_models == 0:
@@ -264,6 +338,7 @@ def train_xgboost_models(
         "validationPeriod": {"from": validation_start.isoformat(), "to": validation_end.isoformat()},
         "featureColumns": FEATURE_COLUMNS,
         "meanAccuracy": mean_accuracy,
+        "recencyWeightedTraining": bool(use_recency_weighting),
         "symbols": sorted(symbol_metrics.keys()),
         "symbolMetrics": symbol_metrics,
         "skippedSymbols": skipped_symbols,
@@ -445,8 +520,9 @@ def predict_symbol_forecasts(
 
         metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
         symbol_accuracy = _safe_float(metrics.get("accuracyScore"), mean_accuracy_fallback)
-        feature_quality = 1.0
-        confidence = float(np.clip((0.75 * symbol_accuracy) + (0.25 * feature_quality), 0.0, 1.0))
+        tree_uncertainty_std = _estimate_tree_uncertainty_std(model, x_row)
+        uncertainty_confidence = float(1.0 / (1.0 + (tree_uncertainty_std * 18.0)))
+        confidence = float(np.clip((0.55 * symbol_accuracy) + (0.45 * uncertainty_confidence), 0.0, 1.0))
 
         forecasts[symbol] = SymbolForecast(
             symbol=symbol,
@@ -465,11 +541,19 @@ def _build_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and persist EGX XGBoost models")
     parser.add_argument("--model-dir", type=str, default="")
     parser.add_argument("--target-mode", type=str, default=os.getenv("AI_TARGET_MODE", DEFAULT_TARGET_MODE))
+    parser.add_argument("--symbols", type=str, default="", help="Comma-separated symbols for scoped retraining")
     parser.add_argument("--horizon-days", type=int, default=DEFAULT_HORIZON_DAYS)
     parser.add_argument("--min-rows-per-symbol", type=int, default=DEFAULT_MIN_ROWS_PER_SYMBOL)
+    parser.add_argument("--disable-recency-weighting", action="store_true")
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--retry-delay-seconds", type=float, default=15.0)
     return parser.parse_args()
+
+
+def _parse_symbols(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip().upper() for item in str(raw).split(",") if item and item.strip()]
 
 
 def main() -> None:
@@ -481,8 +565,10 @@ def main() -> None:
         delay_seconds=max(1.0, float(args.retry_delay_seconds)),
         model_dir=(args.model_dir.strip() or None),
         target_mode=args.target_mode,
+        symbols=_parse_symbols(args.symbols),
         horizon_days=int(args.horizon_days),
         min_rows_per_symbol=int(args.min_rows_per_symbol),
+        use_recency_weighting=not bool(args.disable_recency_weighting),
     )
 
     print(json.dumps(manifest, indent=2))

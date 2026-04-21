@@ -32,6 +32,8 @@ class AllocationItem(BaseModel):
     weight: float = Field(ge=0.0, le=1.0)
     sector: str
     liquidity_cap_value_egp: float = Field(ge=0.0)
+    predicted_return_5d: float = 0.0
+    confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class RejectedSymbol(BaseModel):

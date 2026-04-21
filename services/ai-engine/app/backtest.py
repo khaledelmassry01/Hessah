@@ -4,6 +4,8 @@ from datetime import date
 from math import floor
 from typing import Any
 
+import numpy as np
+
 from .constraints import build_constraint_output
 from .contracts import (
     BacktestAllocationItem,
@@ -17,10 +19,15 @@ from .optimizer import optimize_max_sharpe
 
 MODEL_VERSION = "mpt-egx30-backtest-v2-learning"
 FORWARD_HORIZON_DAYS = 90
+SMART_MAX_SECTOR_CAP = 0.30
+SMART_MIN_CONFIDENCE = 0.55
 
 
 def run_backtest(payload: BacktestRequest) -> BacktestResponse:
     warnings: list[str] = []
+    enforced_sector_cap = min(float(payload.constraints.max_sector_weight), SMART_MAX_SECTOR_CAP)
+    if enforced_sector_cap < float(payload.constraints.max_sector_weight):
+        warnings.append("Sector cap enforced at 30% for Smart Optimizer backtest")
 
     adaptive_params, adaptive_warnings = resolve_adaptive_parameters(payload.risk_level)
     warnings.extend(adaptive_warnings)
@@ -40,7 +47,7 @@ def run_backtest(payload: BacktestRequest) -> BacktestResponse:
         dataset=historical_dataset,
         budget_egp=float(payload.budget_egp),
         risk_level=payload.risk_level,
-        max_sector_weight=float(payload.constraints.max_sector_weight),
+        max_sector_weight=enforced_sector_cap,
         exclude_suspended=payload.constraints.exclude_suspended,
     )
     warnings.extend(constraint_output.warnings)
@@ -64,17 +71,64 @@ def run_backtest(payload: BacktestRequest) -> BacktestResponse:
             warnings=_dedupe_warnings(warnings + ["No eligible symbols after historical constraints"]),
         )
 
-    optimization = optimize_max_sharpe(
-        symbols=constraint_output.symbols,
-        expected_returns=constraint_output.expected_returns,
-        covariance=constraint_output.covariance,
-        bounds=constraint_output.bounds,
-        sector_to_indices=constraint_output.sector_to_indices,
-        max_sector_weight=float(payload.constraints.max_sector_weight),
-        risk_free_rate=adaptive_params.risk_free_rate,
-        covariance_shrinkage=adaptive_params.covariance_shrinkage,
-    )
-    warnings.extend(optimization.warnings)
+    expected_returns = np.array(constraint_output.expected_returns, dtype=float)
+    absolute_signal = np.abs(expected_returns)
+    scale = float(max(np.max(absolute_signal), 1e-9))
+    confidence_scores = np.clip(0.45 + (0.55 * (absolute_signal / scale)), 0.0, 1.0)
+
+    high_confidence_indices = [
+        idx
+        for idx, score in enumerate(confidence_scores)
+        if float(score) >= SMART_MIN_CONFIDENCE
+    ]
+
+    final_weights: dict[str, float] = {}
+    optimization_used_fallback = False
+    cash_weight = 1.0
+
+    if not high_confidence_indices:
+        warnings.append("All symbols fell below confidence threshold; backtest capital held in CASH")
+    else:
+        selected_symbols = [constraint_output.symbols[idx] for idx in high_confidence_indices]
+        selected_returns = expected_returns[high_confidence_indices] * confidence_scores[high_confidence_indices]
+        selected_covariance = constraint_output.covariance[np.ix_(high_confidence_indices, high_confidence_indices)]
+        selected_bounds = [constraint_output.bounds[idx] for idx in high_confidence_indices]
+        selected_sectors = {
+            symbol: constraint_output.sectors[symbol]
+            for symbol in selected_symbols
+        }
+        selected_sector_to_indices = _build_sector_index_map(selected_symbols, selected_sectors)
+
+        optimization = optimize_max_sharpe(
+            symbols=selected_symbols,
+            expected_returns=selected_returns,
+            covariance=selected_covariance,
+            bounds=selected_bounds,
+            sector_to_indices=selected_sector_to_indices,
+            max_sector_weight=enforced_sector_cap,
+            risk_free_rate=adaptive_params.risk_free_rate,
+            covariance_shrinkage=adaptive_params.covariance_shrinkage,
+        )
+        warnings.extend(optimization.warnings)
+        optimization_used_fallback = optimization.used_fallback
+
+        confidence_by_symbol = {
+            symbol: float(confidence_scores[idx])
+            for symbol, idx in zip(selected_symbols, high_confidence_indices)
+        }
+        confidence_sized = {
+            symbol: float(weight) * float(confidence_by_symbol.get(symbol, 0.0))
+            for symbol, weight in optimization.weights.items()
+            if float(weight) > 0.0
+        }
+        final_weights, cash_weight = _apply_sector_cap_and_cash(
+            raw_weights=confidence_sized,
+            sectors=selected_sectors,
+            max_sector_weight=enforced_sector_cap,
+        )
+
+    if cash_weight > 0.0:
+        warnings.append(f"Backtest CASH allocation={cash_weight:.2%} from confidence/sector controls")
 
     evaluation_date = _add_business_days(payload.historical_date, FORWARD_HORIZON_DAYS)
     current_dataset = load_market_dataset(
@@ -89,7 +143,7 @@ def run_backtest(payload: BacktestRequest) -> BacktestResponse:
     invested_value = 0.0
     current_value_positions = 0.0
 
-    for symbol, weight in sorted(optimization.weights.items(), key=lambda item: item[1], reverse=True):
+    for symbol, weight in sorted(final_weights.items(), key=lambda item: item[1], reverse=True):
         historical_snapshot = historical_dataset.snapshots[symbol]
         current_snapshot = current_dataset.snapshots.get(symbol, historical_snapshot)
 
@@ -122,10 +176,15 @@ def run_backtest(payload: BacktestRequest) -> BacktestResponse:
         )
 
     residual_cash = max(0.0, budget - invested_value)
+    confidence_cash = budget * float(cash_weight)
+    residual_cash = max(residual_cash, confidence_cash)
     original_value = budget
     current_value = current_value_positions + residual_cash
     roi_pct = ((current_value - original_value) / original_value) * 100.0 if original_value > 0 else 0.0
-    predicted_return_realized = float(optimization.expected_return)
+    weight_vector = np.array([float(final_weights.get(symbol, 0.0)) for symbol in constraint_output.symbols], dtype=float)
+    predicted_return_realized = float(np.dot(weight_vector, expected_returns)) if weight_vector.size else 0.0
+    variance_realized = float(np.dot(weight_vector, constraint_output.covariance @ weight_vector)) if weight_vector.size else 0.0
+    expected_volatility = float(np.sqrt(max(variance_realized, 0.0)))
     actual_return_realized = ((current_value - original_value) / original_value) if original_value > 0 else 0.0
     prediction_error = actual_return_realized - predicted_return_realized
 
@@ -134,7 +193,7 @@ def run_backtest(payload: BacktestRequest) -> BacktestResponse:
         RejectedSymbol(symbol=item.symbol, reason=item.reason)
         for item in constraint_output.rejected_symbols
     ]
-    if rejected_symbols or optimization.used_fallback or warnings:
+    if rejected_symbols or optimization_used_fallback or warnings:
         status = "PARTIAL"
 
     warnings.extend(
@@ -158,12 +217,63 @@ def run_backtest(payload: BacktestRequest) -> BacktestResponse:
         original_value_egp=round(original_value, 4),
         current_value_egp=round(current_value, 4),
         roi_pct=round(roi_pct, 6),
-        expected_return=round(float(optimization.expected_return), 8),
-        expected_volatility=round(float(optimization.expected_volatility), 8),
+        expected_return=round(float(predicted_return_realized), 8),
+        expected_volatility=round(float(expected_volatility), 8),
         historical_allocations=historical_allocations,
         rejected_symbols=rejected_symbols,
         warnings=_dedupe_warnings(warnings),
     )
+
+
+def _build_sector_index_map(symbols: list[str], sectors: dict[str, str]) -> dict[str, list[int]]:
+    mapping: dict[str, list[int]] = {}
+    for idx, symbol in enumerate(symbols):
+        mapping.setdefault(sectors[symbol], []).append(idx)
+    return mapping
+
+
+def _apply_sector_cap_and_cash(
+    raw_weights: dict[str, float],
+    sectors: dict[str, str],
+    max_sector_weight: float,
+) -> tuple[dict[str, float], float]:
+    positive = {
+        symbol: float(weight)
+        for symbol, weight in raw_weights.items()
+        if float(weight) > 0.0
+    }
+    if not positive:
+        return {}, 1.0
+
+    total = float(sum(positive.values()))
+    if total <= 0.0:
+        return {}, 1.0
+
+    normalized = {
+        symbol: float(weight / total)
+        for symbol, weight in positive.items()
+    }
+
+    capped: dict[str, float] = {}
+    sector_used: dict[str, float] = {}
+    cash_weight = 0.0
+
+    for symbol, weight in sorted(normalized.items(), key=lambda item: item[1], reverse=True):
+        sector = sectors.get(symbol, "UNMAPPED")
+        used = sector_used.get(sector, 0.0)
+        room = max(0.0, float(max_sector_weight) - used)
+        accepted = min(weight, room)
+
+        if accepted > 0.0:
+            capped[symbol] = accepted
+            sector_used[sector] = used + accepted
+
+        cash_weight += max(0.0, weight - accepted)
+
+    allocated = float(sum(capped.values()))
+    cash_weight += max(0.0, 1.0 - allocated - cash_weight)
+    cash_weight = float(np.clip(cash_weight, 0.0, 1.0))
+    return capped, cash_weight
 
 
 def _persist_feedback_event(

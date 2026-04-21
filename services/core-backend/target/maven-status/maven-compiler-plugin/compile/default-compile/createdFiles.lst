@@ -79,6 +79,7 @@ com\egx\core\service\UserService$UserProfile.class
 com\egx\core\client\RestAiClient.class
 com\egx\core\service\AllocationService$1.class
 com\egx\core\domain\StopAlert.class
+com\egx\core\service\PortfolioOptimizer.class
 com\egx\core\controller\PortfolioController$OrderResponse.class
 com\egx\core\exception\InsufficientWalletBalanceException.class
 com\egx\core\service\PortfolioService.class
@@ -115,6 +116,8 @@ com\egx\core\domain\enums\OrderSide.class
 com\egx\core\client\dto\AiRejectedSymbolItem.class
 com\egx\core\repository\PortfolioRunRepository.class
 com\egx\core\domain\User.class
+com\egx\core\service\PortfolioOptimizer$Candidate.class
+com\egx\core\service\PortfolioOptimizer$OptimizationResult.class
 com\egx\core\repository\WalletRepository.class
 com\egx\core\domain\AllocationExecution.class
 com\egx\core\config\SecurityConfig.class

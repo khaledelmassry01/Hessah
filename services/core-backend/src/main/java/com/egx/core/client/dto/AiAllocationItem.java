@@ -2,11 +2,17 @@ package com.egx.core.client.dto;
 
 import java.math.BigDecimal;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 public class AiAllocationItem {
 
     private String symbol;
     private BigDecimal weight;
     private String sector;
+    @JsonProperty("predicted_return_5d")
+    private BigDecimal predictedReturn5d;
+    @JsonProperty("confidence_score")
+    private BigDecimal confidenceScore;
 
     public String getSymbol() {
         return symbol;
@@ -30,5 +36,21 @@ public class AiAllocationItem {
 
     public void setSector(String sector) {
         this.sector = sector;
+    }
+
+    public BigDecimal getPredictedReturn5d() {
+        return predictedReturn5d;
+    }
+
+    public void setPredictedReturn5d(BigDecimal predictedReturn5d) {
+        this.predictedReturn5d = predictedReturn5d;
+    }
+
+    public BigDecimal getConfidenceScore() {
+        return confidenceScore;
+    }
+
+    public void setConfidenceScore(BigDecimal confidenceScore) {
+        this.confidenceScore = confidenceScore;
     }
 }

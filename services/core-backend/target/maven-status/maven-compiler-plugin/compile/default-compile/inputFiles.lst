@@ -121,6 +121,7 @@ C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\Mar
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\MarketMonitorService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\ModelPerformanceService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\OrderService.java
+C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\PortfolioOptimizer.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\PortfolioService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\PremiumAccessService.java
 C:\Project\AI Agent\services\core-backend\src\main\java\com\egx\core\service\SecurityAuditService.java

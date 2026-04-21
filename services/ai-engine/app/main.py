@@ -24,6 +24,7 @@ from .historical_ingestion import ingest_historical_market_data_to_core
 from .instrument_sync import fetch_core_instrument_catalog, sync_live_instruments_to_core
 from .model_training import predict_symbol_forecasts, train_models_with_retry
 from .optimizer import optimize_max_sharpe
+from .prediction_feedback import log_prediction_batch, reconcile_prediction_feedback
 
 app = FastAPI(title="EGX AI Engine", version="0.0.1")
 LOGGER = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ DEFAULT_RETRAIN_TIER = "PREMIUM"
 TRADING_DAYS_PER_YEAR = 252.0
 FORECAST_HORIZON_DAYS = 5.0
 PREVENTIVE_SELL_THRESHOLD_5D = -0.10
+SMART_MAX_SECTOR_CAP = 0.30
+SMART_MIN_CONFIDENCE = 0.55
 
 TRAINING_STATE_LOCK = threading.Lock()
 LATEST_TRAINING_SUMMARY: dict[str, object] = {}
@@ -88,6 +91,25 @@ def model_training_status() -> dict[str, object]:
     return {
         "status": "READY" if snapshot else "UNAVAILABLE",
         "latestTraining": snapshot,
+    }
+
+
+@app.post("/feedback/reconcile")
+def reconcile_feedback(
+    request_id: str = "feedback-reconcile",
+    error_threshold: float = 0.10,
+    lookback_rows: int = 30,
+    trigger_mini_retrain: bool = True,
+) -> dict[str, object]:
+    summary = reconcile_prediction_feedback(
+        error_threshold=float(error_threshold),
+        lookback_rows=max(5, int(lookback_rows)),
+        trigger_mini_retrain=bool(trigger_mini_retrain),
+    )
+    return {
+        "request_id": request_id,
+        "status": "SUCCESS",
+        "summary": summary,
     }
 
 
@@ -162,6 +184,12 @@ def predict(payload: PredictRequest) -> PredictResponse:
     warnings: list[str] = []
 
     try:
+        enforced_sector_cap = min(float(payload.constraints.max_sector_weight), SMART_MAX_SECTOR_CAP)
+        if enforced_sector_cap < float(payload.constraints.max_sector_weight):
+            warnings.append(
+                f"Sector cap enforced at {SMART_MAX_SECTOR_CAP:.0%} for Smart Optimizer"
+            )
+
         dataset = load_market_dataset(
             as_of_date=payload.as_of_date,
             max_adv30_participation=float(payload.constraints.max_adv30_participation),
@@ -173,7 +201,7 @@ def predict(payload: PredictRequest) -> PredictResponse:
             dataset=dataset,
             budget_egp=float(payload.budget_egp),
             risk_level=payload.risk_level,
-            max_sector_weight=float(payload.constraints.max_sector_weight),
+            max_sector_weight=enforced_sector_cap,
             exclude_suspended=payload.constraints.exclude_suspended,
         )
         warnings.extend(constraint_output.warnings)
@@ -325,16 +353,71 @@ def predict(payload: PredictRequest) -> PredictResponse:
 
         expected_returns_ml = np.array(expected_returns_ml_annual, dtype=float)
 
-        optimization = optimize_max_sharpe(
-            symbols=eligible_symbols,
-            expected_returns=expected_returns_ml,
-            covariance=covariance,
-            bounds=bounds,
-            sector_to_indices=sector_to_indices,
-            max_sector_weight=float(payload.constraints.max_sector_weight),
-            risk_free_rate=0.25,
-        )
-        warnings.extend(optimization.warnings)
+        high_confidence_symbols = [
+            symbol
+            for symbol in eligible_symbols
+            if float(symbol_confidence.get(symbol, 0.0)) >= SMART_MIN_CONFIDENCE
+        ]
+
+        final_weights: dict[str, float] = {}
+        optimization_used_fallback = False
+        cash_weight = 1.0
+
+        if not high_confidence_symbols:
+            warnings.append(
+                "All eligible symbols fell below the 55% confidence threshold; allocation shifted to CASH"
+            )
+        else:
+            selected_indices = [eligible_symbols.index(symbol) for symbol in high_confidence_symbols]
+            selected_returns_raw = expected_returns_ml[selected_indices]
+            selected_confidence = np.array(
+                [float(symbol_confidence.get(symbol, 0.0)) for symbol in high_confidence_symbols],
+                dtype=float,
+            )
+
+            confidence_adjusted_returns = selected_returns_raw * np.clip(selected_confidence, 0.0, 1.0)
+            selected_covariance = covariance[np.ix_(selected_indices, selected_indices)]
+            selected_bounds = [bounds[idx] for idx in selected_indices]
+            selected_sectors = {symbol: sectors[symbol] for symbol in high_confidence_symbols}
+            selected_sector_to_indices = _build_sector_index_map(high_confidence_symbols, selected_sectors)
+
+            optimization = optimize_max_sharpe(
+                symbols=high_confidence_symbols,
+                expected_returns=confidence_adjusted_returns,
+                covariance=selected_covariance,
+                bounds=selected_bounds,
+                sector_to_indices=selected_sector_to_indices,
+                max_sector_weight=enforced_sector_cap,
+                risk_free_rate=0.25,
+            )
+            warnings.extend(optimization.warnings)
+            optimization_used_fallback = optimization.used_fallback
+
+            confidence_sized_weights = {
+                symbol: float(weight) * float(symbol_confidence.get(symbol, 0.0))
+                for symbol, weight in optimization.weights.items()
+                if float(weight) > 0.0
+            }
+            final_weights, cash_weight = _apply_sector_cap_and_cash(
+                raw_weights=confidence_sized_weights,
+                sectors=selected_sectors,
+                max_sector_weight=enforced_sector_cap,
+            )
+
+        if cash_weight > 0.0:
+            warnings.append(
+                f"CASH allocation {cash_weight:.2%} due to confidence thresholding and sector cap enforcement"
+            )
+
+        try:
+            log_prediction_batch(
+                as_of_date=payload.as_of_date,
+                predictions=symbol_predicted_return_5d,
+                confidence_scores=symbol_confidence,
+                request_id=payload.request_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Prediction audit logging failed: {exc}")
 
         allocations = [
             AllocationItem(
@@ -342,9 +425,11 @@ def predict(payload: PredictRequest) -> PredictResponse:
                 weight=weight,
                 sector=sectors[symbol],
                 liquidity_cap_value_egp=round(liquidity_caps_egp.get(symbol, 0.0), 4),
+                predicted_return_5d=round(float(symbol_predicted_return_5d.get(symbol, 0.0)), 8),
+                confidence_score=round(float(symbol_confidence.get(symbol, 0.0)), 6),
             )
             for symbol, weight in sorted(
-                optimization.weights.items(),
+                final_weights.items(),
                 key=lambda item: item[1],
                 reverse=True,
             )
@@ -360,7 +445,7 @@ def predict(payload: PredictRequest) -> PredictResponse:
         weighted_confidence = 0.0
         weighted_accuracy = 0.0
 
-        for symbol, weight in optimization.weights.items():
+        for symbol, weight in final_weights.items():
             predicted_return_5d = float(symbol_predicted_return_5d.get(symbol, 0.0))
             confidence = float(symbol_confidence.get(symbol, 0.0))
             accuracy = float(symbol_accuracy.get(symbol, ml_forecasts.model_accuracy))
@@ -385,8 +470,13 @@ def predict(payload: PredictRequest) -> PredictResponse:
                 f"{len(recommendations)} symbol(s) triggered PREVENTIVE_SELL due to predicted >=10% drop"
             )
 
+        weight_vector = np.array([float(final_weights.get(symbol, 0.0)) for symbol in eligible_symbols], dtype=float)
+        expected_return_final = float(np.dot(weight_vector, expected_returns_ml)) if weight_vector.size else 0.0
+        variance_final = float(np.dot(weight_vector, covariance @ weight_vector)) if weight_vector.size else 0.0
+        expected_volatility_final = float(np.sqrt(max(variance_final, 0.0)))
+
         status = "SUCCESS"
-        if rejected_symbols or optimization.used_fallback or warnings:
+        if rejected_symbols or optimization_used_fallback or warnings:
             status = "PARTIAL"
 
         return PredictResponse(
@@ -394,8 +484,8 @@ def predict(payload: PredictRequest) -> PredictResponse:
             status=status,
             model_version=MODEL_VERSION,
             allocations=allocations,
-            expected_return=round(optimization.expected_return, 8),
-            expected_volatility=round(optimization.expected_volatility, 8),
+            expected_return=round(expected_return_final, 8),
+            expected_volatility=round(expected_volatility_final, 8),
             predicted_return=round(predicted_portfolio_return_5d, 8),
             confidence_score=round(float(np.clip(weighted_confidence, 0.0, 1.0)), 6),
             model_accuracy=round(float(np.clip(weighted_accuracy, 0.0, 1.0)), 6),
@@ -440,6 +530,56 @@ def _build_sector_index_map(symbols: list[str], sectors: dict[str, str]) -> dict
         mapping.setdefault(sectors[symbol], []).append(idx)
     return mapping
 
+def _apply_sector_cap_and_cash(
+    raw_weights: dict[str, float],
+    sectors: dict[str, str],
+    max_sector_weight: float,
+) -> tuple[dict[str, float], float]:
+    positive_weights = {
+        symbol: float(weight)
+        for symbol, weight in raw_weights.items()
+        if float(weight) > 0.0
+    }
+    if not positive_weights:
+        return {}, 1.0
+
+    total_weight = float(sum(positive_weights.values()))
+    if total_weight <= 0.0:
+        return {}, 1.0
+
+    normalized = {
+        symbol: float(weight / total_weight)
+        for symbol, weight in positive_weights.items()
+    }
+
+    capped: dict[str, float] = {}
+    sector_used: dict[str, float] = {}
+    cash_weight = 0.0
+
+    for symbol, weight in sorted(normalized.items(), key=lambda item: item[1], reverse=True):
+        sector = sectors.get(symbol, "UNMAPPED")
+        used = sector_used.get(sector, 0.0)
+        room = max(0.0, float(max_sector_weight) - used)
+        accepted = min(weight, room)
+
+        if accepted > 0.0:
+            capped[symbol] = accepted
+            sector_used[sector] = used + accepted
+
+        cash_weight += max(0.0, weight - accepted)
+
+    allocated = float(sum(capped.values()))
+    if allocated > 0.0:
+        capped = {
+            symbol: float(weight)
+            for symbol, weight in capped.items()
+            if weight > 0.0
+        }
+
+    cash_weight += max(0.0, 1.0 - allocated - cash_weight)
+    cash_weight = float(np.clip(cash_weight, 0.0, 1.0))
+    return capped, cash_weight
+
 
 def _canonical_symbol(raw_symbol: object) -> str | None:
     if not isinstance(raw_symbol, str):
@@ -481,7 +621,7 @@ def _run_post_ingest_backtest_cycle() -> BacktestResponse:
         risk_level=risk_level,
         tier=tier,
         constraints=ConstraintBlock(
-            max_sector_weight=0.40,
+            max_sector_weight=SMART_MAX_SECTOR_CAP,
             max_adv30_participation=0.05,
             exclude_suspended=True,
             allow_fractional_shares=False,

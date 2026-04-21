@@ -30,6 +30,13 @@ FEATURE_COLUMNS = [
     "macd_hist",
     "rsi_14",
     "volume",
+    "usd_egp_return",
+    "gold_return",
+    "usd_egp_return_lag1",
+    "usd_egp_return_lag5",
+    "gold_return_lag1",
+    "gold_return_lag5",
+    "relative_strength_vs_egx30",
 ]
 
 
@@ -127,6 +134,106 @@ def load_historical_market_data(
     return frame
 
 
+def load_market_context_data(
+    start_date: date,
+    end_date: date | None = None,
+    settings: MysqlSettings | None = None,
+) -> pd.DataFrame:
+    params: list[Any] = [start_date]
+    query = [
+        "SELECT",
+        "  trade_date,",
+        "  usd_egp_close,",
+        "  gold_usd_close",
+        "FROM market_context",
+        "WHERE trade_date >= %s",
+    ]
+
+    if end_date is not None:
+        query.append("  AND trade_date <= %s")
+        params.append(end_date)
+
+    query.append("ORDER BY trade_date ASC")
+
+    connection = open_mysql_connection(settings=settings)
+    try:
+        try:
+            frame = pd.read_sql(sql="\n".join(query), con=connection, params=params)
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame(
+                columns=[
+                    "trade_date",
+                    "usd_egp_return",
+                    "gold_return",
+                ]
+            )
+    finally:
+        connection.close()
+
+    if frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "trade_date",
+                "usd_egp_return",
+                "gold_return",
+            ]
+        )
+
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    frame["usd_egp_close"] = pd.to_numeric(frame["usd_egp_close"], errors="coerce")
+    frame["gold_usd_close"] = pd.to_numeric(frame["gold_usd_close"], errors="coerce")
+
+    frame = frame.dropna(subset=["trade_date"]).sort_values("trade_date").drop_duplicates("trade_date", keep="last")
+    frame["usd_egp_return"] = frame["usd_egp_close"].pct_change()
+    frame["gold_return"] = frame["gold_usd_close"].pct_change()
+
+    return frame[["trade_date", "usd_egp_return", "gold_return"]].reset_index(drop=True)
+
+
+def add_contextual_features(raw_frame: pd.DataFrame, settings: MysqlSettings | None = None) -> pd.DataFrame:
+    if raw_frame.empty:
+        return raw_frame.copy()
+
+    local = raw_frame.sort_values(["symbol", "trade_date"]).copy()
+    start_value = pd.Timestamp(local["trade_date"].min()).date()
+    end_value = pd.Timestamp(local["trade_date"].max()).date()
+
+    context = load_market_context_data(start_date=start_value, end_date=end_value, settings=settings)
+    merged = local.merge(context, on="trade_date", how="left")
+    merged[["usd_egp_return", "gold_return"]] = merged[["usd_egp_return", "gold_return"]].ffill().bfill()
+    merged["usd_egp_return"] = merged["usd_egp_return"].fillna(0.0)
+    merged["gold_return"] = merged["gold_return"].fillna(0.0)
+
+    merged["usd_egp_return_lag1"] = merged.groupby("symbol")["usd_egp_return"].shift(1)
+    merged["usd_egp_return_lag5"] = merged.groupby("symbol")["usd_egp_return"].shift(5)
+    merged["gold_return_lag1"] = merged.groupby("symbol")["gold_return"].shift(1)
+    merged["gold_return_lag5"] = merged.groupby("symbol")["gold_return"].shift(5)
+    merged[[
+        "usd_egp_return_lag1",
+        "usd_egp_return_lag5",
+        "gold_return_lag1",
+        "gold_return_lag5",
+    ]] = merged[[
+        "usd_egp_return_lag1",
+        "usd_egp_return_lag5",
+        "gold_return_lag1",
+        "gold_return_lag5",
+    ]].ffill().bfill().fillna(0.0)
+
+    egx30_return = (
+        merged.groupby("trade_date", as_index=False)["daily_return"]
+        .mean()
+        .rename(columns={"daily_return": "egx30_index_return"})
+    )
+    merged = merged.merge(egx30_return, on="trade_date", how="left")
+    safe_denominator = merged["egx30_index_return"].replace(0.0, np.nan)
+    merged["relative_strength_vs_egx30"] = merged["daily_return"] / safe_denominator
+    merged["relative_strength_vs_egx30"] = merged["relative_strength_vs_egx30"].replace([np.inf, -np.inf], np.nan)
+    merged["relative_strength_vs_egx30"] = merged["relative_strength_vs_egx30"].fillna(0.0)
+
+    return merged.drop(columns=["egx30_index_return"])
+
+
 def compute_rsi(close_series: pd.Series, period: int = 14) -> pd.Series:
     delta = close_series.diff()
     gain = delta.clip(lower=0.0)
@@ -178,6 +285,7 @@ def build_feature_dataset(
         raise ValueError("horizon_days must be >= 1")
 
     enriched = add_technical_indicators(raw_frame)
+    enriched = add_contextual_features(enriched)
     if enriched.empty:
         return FeatureDataset(frame=enriched, symbols=[])
 
@@ -205,6 +313,7 @@ def build_latest_feature_rows(
         return raw_frame.copy()
 
     enriched = add_technical_indicators(raw_frame)
+    enriched = add_contextual_features(enriched)
     if as_of_date is not None:
         cutoff = pd.Timestamp(as_of_date)
         enriched = enriched.loc[enriched["trade_date"] <= cutoff].copy()

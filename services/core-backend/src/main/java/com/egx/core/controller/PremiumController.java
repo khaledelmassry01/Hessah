@@ -40,7 +40,7 @@ import jakarta.validation.constraints.NotNull;
 @Validated
 public class PremiumController {
 
-    private static final BigDecimal DEFAULT_MAX_SECTOR_WEIGHT = new BigDecimal("0.40");
+    private static final BigDecimal DEFAULT_MAX_SECTOR_WEIGHT = new BigDecimal("0.30");
     private static final BigDecimal DEFAULT_MAX_ADV30_PARTICIPATION = new BigDecimal("0.05");
 
     private final PremiumAccessService premiumAccessService;
