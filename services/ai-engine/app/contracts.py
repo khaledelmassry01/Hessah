@@ -49,8 +49,11 @@ class RecommendationItem(BaseModel):
     symbol: str
     action: Literal["PREVENTIVE_SELL", "SELL", "HOLD", "BUY"]
     reason: str
+    top_reasons: list[str] = Field(default_factory=list)
     predicted_return_5d: float
     confidence_score: float = Field(ge=0.0, le=1.0)
+    dynamic_confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    risk_reward_ratio: float = 0.0
 
 
 class PredictResponse(BaseModel):
@@ -65,6 +68,7 @@ class PredictResponse(BaseModel):
     predicted_return: float = 0.0
     confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
     model_accuracy: float = Field(default=0.0, ge=0.0, le=1.0)
+    top_recommendations: list[RecommendationItem] = Field(default_factory=list)
     recommendations: list[RecommendationItem] = Field(default_factory=list)
     rejected_symbols: list[RejectedSymbol] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

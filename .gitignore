@@ -4,3 +4,5 @@ infra/.env
 infra/docker-compose.yml
 infra/infra
 services/api-gateway/target
+**/__pycache__/
+*.pyc

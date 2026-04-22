@@ -324,6 +324,7 @@ public class PortfolioController {
                             readText(item, "symbol"),
                             readText(item, "action"),
                             readText(item, "reason"),
+                            readTextList(item, "topReasons", "top_reasons"),
                             readDecimal(item, "predictedReturn5d", "predicted_return_5d"),
                             readDecimal(item, "confidenceScore", "confidence_score")
                     )
@@ -375,6 +376,22 @@ public class PortfolioController {
         }
 
         return null;
+    }
+
+    private List<String> readTextList(JsonNode node, String... keys) {
+        for (String key : keys) {
+            JsonNode arrayNode = node.get(key);
+            if (arrayNode != null && arrayNode.isArray()) {
+                List<String> result = new ArrayList<>();
+                for (JsonNode element : arrayNode) {
+                    if (element != null && element.isTextual()) {
+                        result.add(element.asText());
+                    }
+                }
+                return result;
+            }
+        }
+        return List.of();
     }
 
     private BigDecimal sumLedgerEntries(Long portfolioRunId, LedgerEntryType entryType) {
@@ -521,10 +538,11 @@ public class PortfolioController {
     ) {
     }
 
-        public record RecommendationResponse(
+    public record RecommendationResponse(
             String symbol,
             String action,
             String reason,
+            List<String> topReasons,
             BigDecimal predictedReturn5d,
             BigDecimal confidenceScore
         ) {

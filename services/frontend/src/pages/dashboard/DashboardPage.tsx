@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { PortfolioPieChart } from "@/components/charts/PortfolioPieChart";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -90,11 +91,8 @@ export function DashboardPage() {
   const displayedModelAccuracy =
     typeof portfolioModelAccuracy === "number" ? portfolioModelAccuracy : latestAccuracy;
 
-  const preventiveSellRecommendations = useMemo(
-    () =>
-      (portfolioQuery.data?.recommendations ?? []).filter(
-        (item) => item.action?.toUpperCase() === "PREVENTIVE_SELL",
-      ),
+  const aiRecommendations = useMemo(
+    () => portfolioQuery.data?.recommendations ?? [],
     [portfolioQuery.data?.recommendations],
   );
 
@@ -228,32 +226,53 @@ export function DashboardPage() {
         </Card>
       </section>
 
-      {preventiveSellRecommendations.length > 0 ? (
+      {aiRecommendations.length > 0 ? (
         <section>
-          <Card className="border-amber-400/40 bg-amber-500/10 text-amber-100">
+          <Card className="border-slate-700/70 bg-slate-950/80 text-slate-100">
             <CardHeader>
-              <CardTitle>PREVENTIVE_SELL Recommendations</CardTitle>
-              <CardDescription className="text-amber-100/80">
-                AI model detected potential downside risk of at least 10% over the next 5 trading days.
+              <CardTitle>AI Recommendations & Logic</CardTitle>
+              <CardDescription className="text-slate-400">
+                Detailed reasoning for allocations and portfolio predictions.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-3">
-              {preventiveSellRecommendations.map((item, index) => (
-                <div
-                  key={`${item.symbol || "unknown"}-${index}`}
-                  className="rounded-md border border-amber-300/30 bg-slate-950/50 p-3 text-sm"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold">{item.symbol || "Unknown Symbol"}</span>
-                    <span className="text-amber-300">{item.action || "PREVENTIVE_SELL"}</span>
+            <CardContent className="space-y-4">
+              {aiRecommendations.map((item, index) => {
+                const confidence = item.confidenceScore ?? 0;
+                const isHighConfidence = confidence > 0.65;
+                const badgeVariant = isHighConfidence ? "success" : "warning";
+
+                return (
+                  <div
+                    key={`${item.symbol || "unknown"}-${index}`}
+                    className="rounded-md border border-slate-700 bg-slate-900/50 p-4 text-sm"
+                  >
+                    <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                      <div className="flex items-center gap-3">
+                        <span className="text-lg font-semibold">{item.symbol || "Global"}</span>
+                        <Badge variant={badgeVariant}>
+                          {formatPercent(item.confidenceScore)} Confidence
+                        </Badge>
+                      </div>
+                      <span className="font-bold text-cyan-400">{item.action || "ANALYZE"}</span>
+                    </div>
+                    
+                    <div className="mt-3 text-slate-300">
+                      <p className="font-medium text-slate-100 mb-1">{item.reason}</p>
+                      {item.topReasons && item.topReasons.length > 0 ? (
+                        <ul className="mt-2 list-disc pl-5 space-y-1 text-slate-400">
+                          {item.topReasons.map((r, i) => (
+                            <li key={i}>{r}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
+                      <span>Predicted Return (5D): {formatSignedPercent(item.predictedReturn5d)}</span>
+                    </div>
                   </div>
-                  <div className="mt-1 text-amber-100/85">{item.reason || "Downside risk detected"}</div>
-                  <div className="mt-2 flex items-center justify-between text-xs text-amber-100/70">
-                    <span>Predicted Return (5D): {formatSignedPercent(item.predictedReturn5d)}</span>
-                    <span>Confidence: {formatPercent(item.confidenceScore)}</span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </CardContent>
           </Card>
         </section>

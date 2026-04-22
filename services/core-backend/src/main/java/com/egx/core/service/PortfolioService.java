@@ -24,6 +24,7 @@ import com.egx.core.domain.AllocationExecution;
 import com.egx.core.domain.PortfolioRun;
 import com.egx.core.domain.PortfolioTarget;
 import com.egx.core.domain.StockInstrument;
+import com.egx.core.domain.StopRule;
 import com.egx.core.domain.TradeOrder;
 import com.egx.core.domain.Wallet;
 import com.egx.core.domain.enums.PortfolioRunStatus;
@@ -36,6 +37,7 @@ import com.egx.core.repository.AiPredictionAuditRepository;
 import com.egx.core.repository.PortfolioRunRepository;
 import com.egx.core.repository.PortfolioTargetRepository;
 import com.egx.core.repository.StockInstrumentRepository;
+import com.egx.core.repository.StopRuleRepository;
 import com.egx.core.repository.SubscriptionRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -59,6 +61,7 @@ public class PortfolioService {
     private final StockInstrumentRepository stockInstrumentRepository;
     private final AiClient aiClient;
     private final AiPredictionAuditRepository aiPredictionAuditRepository;
+    private final StopRuleRepository stopRuleRepository;
     private final AllocationService allocationService;
     private final OrderService orderService;
     private final PortfolioOptimizer portfolioOptimizer;
@@ -73,6 +76,7 @@ public class PortfolioService {
             StockInstrumentRepository stockInstrumentRepository,
             AiClient aiClient,
             AiPredictionAuditRepository aiPredictionAuditRepository,
+            StopRuleRepository stopRuleRepository,
             AllocationService allocationService,
             OrderService orderService,
             PortfolioOptimizer portfolioOptimizer,
@@ -86,6 +90,7 @@ public class PortfolioService {
         this.stockInstrumentRepository = stockInstrumentRepository;
         this.aiClient = aiClient;
         this.aiPredictionAuditRepository = aiPredictionAuditRepository;
+        this.stopRuleRepository = stopRuleRepository;
         this.allocationService = allocationService;
         this.orderService = orderService;
         this.portfolioOptimizer = portfolioOptimizer;
@@ -201,6 +206,25 @@ public class PortfolioService {
             successDetails.put("status", portfolioRun.getRunStatus().name());
             successDetails.put("usedVirtualTestingBalance", usingVirtualTestingBalance);
             securityAuditService.log("PORTFOLIO_GENERATION", userId, "SUCCESS", successDetails);
+
+            List<StopRule> stopRules = new ArrayList<>();
+            for (AllocationExecution exec : allocationResult.executions()) {
+                if (exec.getExecutedShares() != null && exec.getExecutedShares() > 0) {
+                    StopRule rule = new StopRule();
+                    rule.setUserId(userId);
+                    rule.setStockId(exec.getStockId());
+                    rule.setPortfolioRunId(portfolioRun.getId());
+                    rule.setStopLossPct(new BigDecimal("0.050"));
+                    rule.setTakeProfitPct(new BigDecimal("0.100"));
+                    rule.setIsActive(true);
+                    rule.setCreatedAt(LocalDateTime.now());
+                    rule.setUpdatedAt(LocalDateTime.now());
+                    stopRules.add(rule);
+                }
+            }
+            if (!stopRules.isEmpty()) {
+                stopRuleRepository.saveAll(stopRules);
+            }
 
             return new PortfolioExecutionResult(
                     portfolioRun,

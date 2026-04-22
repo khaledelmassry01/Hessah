@@ -11,14 +11,18 @@ import mysql.connector
 import numpy as np
 import pandas as pd
 
+from .sentiment_engine import append_market_sentiment_features
+
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_DB_HOST = "mysql-db"
-DEFAULT_DB_PORT = 3306
+DEFAULT_DB_PORT = 3307
 DEFAULT_DB_NAME = "egx_portfolio"
 DEFAULT_DB_USER = "egx_app_user"
 DEFAULT_DB_PASSWORD = "EGX_App_7wN!9Qx2#M4Lz8"
 DEFAULT_LOOKBACK_START = date(2016, 1, 1)
+UREA_SYMBOL_ROOTS = {"ABUK", "MFPC"}
+BRENT_SYMBOL_ROOTS = {"AMOC", "SKPC"}
 
 FEATURE_COLUMNS = [
     "close_price",
@@ -30,13 +34,20 @@ FEATURE_COLUMNS = [
     "macd_hist",
     "rsi_14",
     "volume",
+    "relative_volume_60d",
     "usd_egp_return",
     "gold_return",
+    "market_sentiment_score",
+    "global_factor_corr_sp500",
+    "smart_money_signal",
     "usd_egp_return_lag1",
     "usd_egp_return_lag5",
     "gold_return_lag1",
     "gold_return_lag5",
     "relative_strength_vs_egx30",
+    "alt_urea_price",
+    "alt_brent_price",
+    "alt_news_sentiment_score",
 ]
 
 
@@ -159,7 +170,39 @@ def load_market_context_data(
     try:
         try:
             frame = pd.read_sql(sql="\n".join(query), con=connection, params=params)
-        except Exception:  # noqa: BLE001
+             
+            # Also fetch alternative data on port 3307
+            alt_conn = open_mysql_connection(settings=MysqlSettings(
+                host=settings.host if settings else DEFAULT_DB_HOST,
+                port=3307,
+                user=settings.user if settings else DEFAULT_DB_USER,
+                password=settings.password if settings else DEFAULT_DB_PASSWORD,
+                database=settings.database if settings else DEFAULT_DB_NAME
+            ))
+            
+            try:
+                urea = pd.read_sql("SELECT trade_date, price as alt_urea_price FROM daily_commodities WHERE commodity_name = 'Urea' AND trade_date >= %s", alt_conn, params=[start_date])
+                brent = pd.read_sql("SELECT trade_date, price as alt_brent_price FROM daily_commodities WHERE commodity_name = 'Brent Crude' AND trade_date >= %s", alt_conn, params=[start_date])
+                news = pd.read_sql("SELECT trade_date, market_sentiment_score as alt_news_sentiment_score FROM daily_market_sentiment WHERE trade_date >= %s", alt_conn, params=[start_date])
+                
+                urea["trade_date"] = pd.to_datetime(urea["trade_date"], errors="coerce")
+                brent["trade_date"] = pd.to_datetime(brent["trade_date"], errors="coerce")
+                news["trade_date"] = pd.to_datetime(news["trade_date"], errors="coerce")
+                frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+
+                frame = frame.merge(urea, on="trade_date", how="left")
+                frame = frame.merge(brent, on="trade_date", how="left")
+                frame = frame.merge(news, on="trade_date", how="left")
+            except Exception as alt_exc:
+                LOGGER.warning(f"Failed to fetch alternative data: {alt_exc}")
+                frame["alt_urea_price"] = np.nan
+                frame["alt_brent_price"] = np.nan
+                frame["alt_news_sentiment_score"] = np.nan
+            finally:
+                alt_conn.close()
+
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning(f"Failed pulling context data: {e}")
             return pd.DataFrame(
                 columns=[
                     "trade_date",
@@ -182,12 +225,21 @@ def load_market_context_data(
     frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
     frame["usd_egp_close"] = pd.to_numeric(frame["usd_egp_close"], errors="coerce")
     frame["gold_usd_close"] = pd.to_numeric(frame["gold_usd_close"], errors="coerce")
+    
+    if "alt_urea_price" in frame.columns:
+        frame["alt_urea_price"] = pd.to_numeric(frame["alt_urea_price"], errors="coerce").ffill()
+        frame["alt_brent_price"] = pd.to_numeric(frame["alt_brent_price"], errors="coerce").ffill()
+        frame["alt_news_sentiment_score"] = pd.to_numeric(frame["alt_news_sentiment_score"], errors="coerce").ffill()
+    else:
+        frame["alt_urea_price"] = np.nan
+        frame["alt_brent_price"] = np.nan
+        frame["alt_news_sentiment_score"] = np.nan
 
     frame = frame.dropna(subset=["trade_date"]).sort_values("trade_date").drop_duplicates("trade_date", keep="last")
     frame["usd_egp_return"] = frame["usd_egp_close"].pct_change()
     frame["gold_return"] = frame["gold_usd_close"].pct_change()
 
-    return frame[["trade_date", "usd_egp_return", "gold_return"]].reset_index(drop=True)
+    return frame[["trade_date", "usd_egp_return", "gold_return", "alt_urea_price", "alt_brent_price", "alt_news_sentiment_score"]].reset_index(drop=True)
 
 
 def add_contextual_features(raw_frame: pd.DataFrame, settings: MysqlSettings | None = None) -> pd.DataFrame:
@@ -231,6 +283,29 @@ def add_contextual_features(raw_frame: pd.DataFrame, settings: MysqlSettings | N
     merged["relative_strength_vs_egx30"] = merged["relative_strength_vs_egx30"].replace([np.inf, -np.inf], np.nan)
     merged["relative_strength_vs_egx30"] = merged["relative_strength_vs_egx30"].fillna(0.0)
 
+    # Process alternative data for specific sectors and support both ROOT and ROOT.CA forms.
+    symbol_roots = merged["symbol"].astype(str).str.upper().str.split(".").str[0]
+    if "alt_urea_price" in merged.columns:
+        merged["alt_urea_price"] = np.where(
+            symbol_roots.isin(UREA_SYMBOL_ROOTS),
+            merged["alt_urea_price"],
+            0.0,
+        )
+        merged["alt_urea_price"] = merged["alt_urea_price"].fillna(0.0)
+
+    if "alt_brent_price" in merged.columns:
+        merged["alt_brent_price"] = np.where(
+            symbol_roots.isin(BRENT_SYMBOL_ROOTS),
+            merged["alt_brent_price"],
+            0.0,
+        )
+        merged["alt_brent_price"] = merged["alt_brent_price"].fillna(0.0)
+        
+    if "alt_news_sentiment_score" in merged.columns:
+        merged["alt_news_sentiment_score"] = merged["alt_news_sentiment_score"].fillna(0.0)
+
+    merged = append_market_sentiment_features(merged)
+
     return merged.drop(columns=["egx30_index_return"])
 
 
@@ -268,6 +343,12 @@ def add_technical_indicators(raw_frame: pd.DataFrame) -> pd.DataFrame:
         local["macd_hist"] = local["macd"] - local["macd_signal"]
 
         local["rsi_14"] = compute_rsi(close, period=14)
+
+        volume_float = local["volume"].astype(float)
+        local["volume_60d_avg"] = volume_float.rolling(window=60, min_periods=20).mean()
+        safe_volume_avg = local["volume_60d_avg"].replace(0.0, np.nan)
+        local["relative_volume_60d"] = (volume_float / safe_volume_avg).replace([np.inf, -np.inf], np.nan)
+        local["relative_volume_60d"] = local["relative_volume_60d"].fillna(1.0)
 
         # Keep per-symbol continuity with forward fill before dropping rows.
         local = local.ffill()

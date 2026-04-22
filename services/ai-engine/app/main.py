@@ -38,6 +38,14 @@ FORECAST_HORIZON_DAYS = 5.0
 PREVENTIVE_SELL_THRESHOLD_5D = -0.10
 SMART_MAX_SECTOR_CAP = 0.30
 SMART_MIN_CONFIDENCE = 0.55
+RUNTIME_SMART_MONEY_LOW_VOLUME_DOWNSCALE = 0.85
+DYNAMIC_CONFIDENCE_MIN = 0.45
+DYNAMIC_CONFIDENCE_MAX = 0.80
+TOP_RECOMMENDATION_COUNT = 3
+ALT_NEWS_INFLUENCE_THRESHOLD = 0.08
+ALT_COMMODITY_INFLUENCE_THRESHOLD = 0.10
+UREA_SYMBOL_ROOTS = {"ABUK", "MFPC"}
+BRENT_SYMBOL_ROOTS = {"AMOC", "SKPC"}
 
 TRAINING_STATE_LOCK = threading.Lock()
 LATEST_TRAINING_SUMMARY: dict[str, object] = {}
@@ -250,9 +258,10 @@ def predict(payload: PredictRequest) -> PredictResponse:
                 )
 
         catalog_items = catalog.get("items") if isinstance(catalog, dict) else None
+        catalog_items_list = catalog_items if isinstance(catalog_items, list) else []
         catalog_symbols = {
             canonical
-            for item in (catalog_items or [])
+            for item in catalog_items_list
             if isinstance(item, dict)
             for canonical in [_canonical_symbol(item.get("symbol"))]
             if canonical is not None
@@ -330,9 +339,22 @@ def predict(payload: PredictRequest) -> PredictResponse:
 
         annualization_factor = TRADING_DAYS_PER_YEAR / FORECAST_HORIZON_DAYS
         symbol_predicted_return_5d: dict[str, float] = {}
+        symbol_confidence_raw: dict[str, float] = {}
         symbol_confidence: dict[str, float] = {}
+        symbol_dynamic_threshold: dict[str, float] = {}
+        symbol_risk_reward: dict[str, float] = {}
         symbol_accuracy: dict[str, float] = {}
+        symbol_relative_volume: dict[str, float] = {}
+        symbol_market_sentiment: dict[str, float] = {}
+        symbol_smart_money_signal: dict[str, float] = {}
+        symbol_alt_news_sentiment: dict[str, float] = {}
+        symbol_alt_urea_price: dict[str, float] = {}
+        symbol_alt_brent_price: dict[str, float] = {}
+        symbol_alt_news_influence: dict[str, float] = {}
+        symbol_alt_urea_influence: dict[str, float] = {}
+        symbol_alt_brent_influence: dict[str, float] = {}
         expected_returns_ml_annual: list[float] = []
+        smart_money_downgraded_symbols = 0
 
         for idx, symbol in enumerate(eligible_symbols):
             fallback_return_annual = float(expected_returns[idx])
@@ -341,22 +363,91 @@ def predict(payload: PredictRequest) -> PredictResponse:
 
             if forecast is None:
                 expected_returns_ml_annual.append(fallback_return_annual)
-                symbol_predicted_return_5d[symbol] = fallback_return_5d
-                symbol_confidence[symbol] = 0.0
-                symbol_accuracy[symbol] = float(ml_forecasts.model_accuracy)
-                continue
+                predicted_return_5d = fallback_return_5d
+                raw_confidence = 0.0
+                model_accuracy = float(ml_forecasts.model_accuracy)
+                relative_volume_60d = 1.0
+                market_sentiment_score = 0.0
+                smart_money_signal = 0.0
+                alt_news_sentiment_score = 0.0
+                alt_urea_price = 0.0
+                alt_brent_price = 0.0
+                alt_news_influence_share = 0.0
+                alt_urea_influence_share = 0.0
+                alt_brent_influence_share = 0.0
+            else:
+                predicted_return_5d = float(forecast.predicted_return_5d)
+                expected_returns_ml_annual.append(predicted_return_5d * annualization_factor)
+                raw_confidence = float(forecast.confidence_score)
+                model_accuracy = float(forecast.model_accuracy)
+                relative_volume_60d = float(forecast.relative_volume_60d)
+                market_sentiment_score = float(forecast.market_sentiment_score)
+                smart_money_signal = float(forecast.smart_money_signal)
+                alt_news_sentiment_score = float(forecast.alt_news_sentiment_score)
+                alt_urea_price = float(forecast.alt_urea_price)
+                alt_brent_price = float(forecast.alt_brent_price)
+                alt_news_influence_share = float(forecast.alt_news_influence_share)
+                alt_urea_influence_share = float(forecast.alt_urea_influence_share)
+                alt_brent_influence_share = float(forecast.alt_brent_influence_share)
 
-            expected_returns_ml_annual.append(float(forecast.predicted_return_5d) * annualization_factor)
-            symbol_predicted_return_5d[symbol] = float(forecast.predicted_return_5d)
-            symbol_confidence[symbol] = float(forecast.confidence_score)
-            symbol_accuracy[symbol] = float(forecast.model_accuracy)
+            runtime_smart_money_multiplier = _compute_runtime_smart_money_multiplier(
+                relative_volume_60d=relative_volume_60d,
+                smart_money_signal=smart_money_signal,
+            )
+            adjusted_confidence = float(np.clip(raw_confidence * runtime_smart_money_multiplier, 0.0, 1.0))
+            if adjusted_confidence + 1e-12 < raw_confidence:
+                smart_money_downgraded_symbols += 1
+
+            snapshot = dataset.snapshots.get(symbol)
+            volatility_annualized = float(snapshot.volatility_20d) if snapshot is not None else 0.0
+            risk_reward_ratio = _compute_risk_reward_ratio(
+                predicted_return_5d=predicted_return_5d,
+                volatility_annualized=volatility_annualized,
+            )
+            dynamic_confidence_threshold = _compute_dynamic_confidence_threshold(
+                base_threshold=SMART_MIN_CONFIDENCE,
+                risk_reward_ratio=risk_reward_ratio,
+                market_sentiment_score=market_sentiment_score,
+                smart_money_signal=smart_money_signal,
+                relative_volume_60d=relative_volume_60d,
+            )
+
+            symbol_predicted_return_5d[symbol] = predicted_return_5d
+            symbol_confidence_raw[symbol] = raw_confidence
+            symbol_confidence[symbol] = adjusted_confidence
+            symbol_dynamic_threshold[symbol] = dynamic_confidence_threshold
+            symbol_risk_reward[symbol] = risk_reward_ratio
+            symbol_accuracy[symbol] = model_accuracy
+            symbol_relative_volume[symbol] = relative_volume_60d
+            symbol_market_sentiment[symbol] = market_sentiment_score
+            symbol_smart_money_signal[symbol] = smart_money_signal
+            symbol_alt_news_sentiment[symbol] = alt_news_sentiment_score
+            symbol_alt_urea_price[symbol] = alt_urea_price
+            symbol_alt_brent_price[symbol] = alt_brent_price
+            symbol_alt_news_influence[symbol] = alt_news_influence_share
+            symbol_alt_urea_influence[symbol] = alt_urea_influence_share
+            symbol_alt_brent_influence[symbol] = alt_brent_influence_share
+
+        if smart_money_downgraded_symbols > 0:
+            warnings.append(
+                f"Smart-money filter reduced confidence for {smart_money_downgraded_symbols} symbol(s)"
+            )
+
+        if symbol_dynamic_threshold:
+            dynamic_threshold_values = list(symbol_dynamic_threshold.values())
+            warnings.append(
+                "Dynamic confidence thresholds active "
+                f"(min={min(dynamic_threshold_values):.2f}, max={max(dynamic_threshold_values):.2f})"
+            )
 
         expected_returns_ml = np.array(expected_returns_ml_annual, dtype=float)
 
         high_confidence_symbols = [
             symbol
             for symbol in eligible_symbols
-            if float(symbol_confidence.get(symbol, 0.0)) >= SMART_MIN_CONFIDENCE
+            if float(symbol_predicted_return_5d.get(symbol, 0.0)) > 0.0
+            and float(symbol_confidence.get(symbol, 0.0))
+            >= float(symbol_dynamic_threshold.get(symbol, SMART_MIN_CONFIDENCE))
         ]
 
         final_weights: dict[str, float] = {}
@@ -365,7 +456,7 @@ def predict(payload: PredictRequest) -> PredictResponse:
 
         if not high_confidence_symbols:
             warnings.append(
-                "All eligible symbols fell below the 55% confidence threshold; allocation shifted to CASH"
+                "All eligible symbols fell below dynamic confidence thresholds; allocation shifted to CASH"
             )
         else:
             selected_indices = [eligible_symbols.index(symbol) for symbol in high_confidence_symbols]
@@ -441,33 +532,86 @@ def predict(payload: PredictRequest) -> PredictResponse:
         ] + preflight_rejected
 
         recommendations: list[RecommendationItem] = []
+        top_recommendations: list[RecommendationItem] = []
         predicted_portfolio_return_5d = 0.0
         weighted_confidence = 0.0
         weighted_accuracy = 0.0
+        preventive_sell_count = 0
 
-        for symbol, weight in final_weights.items():
+        ranked_allocations = sorted(
+            final_weights.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        top_recommendation_symbols = {
+            symbol
+            for symbol, _ in ranked_allocations[:TOP_RECOMMENDATION_COUNT]
+        }
+
+        for symbol, weight in ranked_allocations:
             predicted_return_5d = float(symbol_predicted_return_5d.get(symbol, 0.0))
             confidence = float(symbol_confidence.get(symbol, 0.0))
             accuracy = float(symbol_accuracy.get(symbol, ml_forecasts.model_accuracy))
+            dynamic_threshold = float(symbol_dynamic_threshold.get(symbol, SMART_MIN_CONFIDENCE))
+            risk_reward_ratio = float(symbol_risk_reward.get(symbol, 0.0))
 
             predicted_portfolio_return_5d += float(weight) * predicted_return_5d
             weighted_confidence += float(weight) * confidence
             weighted_accuracy += float(weight) * accuracy
 
             if predicted_return_5d <= PREVENTIVE_SELL_THRESHOLD_5D:
-                recommendations.append(
-                    RecommendationItem(
-                        symbol=_canonical_symbol(symbol) or symbol,
-                        action="PREVENTIVE_SELL",
-                        reason="Model predicts >= 10% downside over next 5 trading days",
-                        predicted_return_5d=round(predicted_return_5d, 8),
-                        confidence_score=round(confidence, 6),
-                    )
-                )
+                action = "PREVENTIVE_SELL"
+                preventive_sell_count += 1
+            elif predicted_return_5d < 0.0:
+                action = "SELL"
+            elif confidence >= dynamic_threshold:
+                action = "BUY"
+            else:
+                action = "HOLD"
 
-        if recommendations:
+            top_reasons = _build_xai_top_reasons(
+                symbol=symbol,
+                action=action,
+                predicted_return_5d=predicted_return_5d,
+                confidence_score=confidence,
+                dynamic_confidence_threshold=dynamic_threshold,
+                risk_reward_ratio=risk_reward_ratio,
+                market_sentiment_score=float(symbol_market_sentiment.get(symbol, 0.0)),
+                smart_money_signal=float(symbol_smart_money_signal.get(symbol, 0.0)),
+                relative_volume_60d=float(symbol_relative_volume.get(symbol, 1.0)),
+                alt_news_sentiment_score=float(symbol_alt_news_sentiment.get(symbol, 0.0)),
+                alt_urea_price=float(symbol_alt_urea_price.get(symbol, 0.0)),
+                alt_brent_price=float(symbol_alt_brent_price.get(symbol, 0.0)),
+                alt_news_influence_share=float(symbol_alt_news_influence.get(symbol, 0.0)),
+                alt_urea_influence_share=float(symbol_alt_urea_influence.get(symbol, 0.0)),
+                alt_brent_influence_share=float(symbol_alt_brent_influence.get(symbol, 0.0)),
+            )
+
+            recommendation = RecommendationItem(
+                symbol=_canonical_symbol(symbol) or symbol,
+                action=action,
+                reason=(top_reasons[0] if top_reasons else "No dominant explainability signal"),
+                top_reasons=top_reasons,
+                predicted_return_5d=round(predicted_return_5d, 8),
+                confidence_score=round(confidence, 6),
+                dynamic_confidence_threshold=round(dynamic_threshold, 6),
+                risk_reward_ratio=round(risk_reward_ratio, 6),
+            )
+
+            if symbol in top_recommendation_symbols:
+                top_recommendations.append(recommendation)
+                recommendations.append(recommendation)
+            elif action == "PREVENTIVE_SELL":
+                recommendations.append(recommendation)
+
+        if preventive_sell_count > 0:
             warnings.append(
-                f"{len(recommendations)} symbol(s) triggered PREVENTIVE_SELL due to predicted >=10% drop"
+                f"{preventive_sell_count} symbol(s) triggered PREVENTIVE_SELL due to predicted >=10% drop"
+            )
+
+        if len(top_recommendations) < TOP_RECOMMENDATION_COUNT:
+            warnings.append(
+                f"Top recommendation set contains {len(top_recommendations)} symbol(s) after confidence and risk filters"
             )
 
         weight_vector = np.array([float(final_weights.get(symbol, 0.0)) for symbol in eligible_symbols], dtype=float)
@@ -489,6 +633,7 @@ def predict(payload: PredictRequest) -> PredictResponse:
             predicted_return=round(predicted_portfolio_return_5d, 8),
             confidence_score=round(float(np.clip(weighted_confidence, 0.0, 1.0)), 6),
             model_accuracy=round(float(np.clip(weighted_accuracy, 0.0, 1.0)), 6),
+            top_recommendations=top_recommendations,
             recommendations=recommendations,
             rejected_symbols=rejected_symbols,
             warnings=warnings,
@@ -522,6 +667,172 @@ def predict(payload: PredictRequest) -> PredictResponse:
 @app.post("/backtest", response_model=BacktestResponse)
 def backtest(payload: BacktestRequest) -> BacktestResponse:
     return safe_run_backtest(payload)
+
+
+def _compute_runtime_smart_money_multiplier(
+    relative_volume_60d: float,
+    smart_money_signal: float,
+) -> float:
+    relative_volume = float(np.clip(relative_volume_60d, 0.30, 3.0))
+    low_volume_multiplier = 1.0
+    if relative_volume < 1.0:
+        low_volume_multiplier = float(
+            np.clip(relative_volume, 0.60, 1.0) * RUNTIME_SMART_MONEY_LOW_VOLUME_DOWNSCALE
+        )
+
+    if smart_money_signal < 0.0:
+        signal_multiplier = float(np.clip(1.0 + smart_money_signal, 0.70, 1.0))
+    else:
+        signal_multiplier = 1.0
+
+    return float(np.clip(low_volume_multiplier * signal_multiplier, 0.50, 1.0))
+
+
+def _compute_risk_reward_ratio(
+    predicted_return_5d: float,
+    volatility_annualized: float,
+) -> float:
+    horizon_volatility_5d = float(max(0.0, volatility_annualized)) * float(
+        np.sqrt(FORECAST_HORIZON_DAYS / TRADING_DAYS_PER_YEAR)
+    )
+    denominator = max(horizon_volatility_5d, 1e-4)
+    return float(predicted_return_5d / denominator)
+
+
+def _compute_dynamic_confidence_threshold(
+    base_threshold: float,
+    risk_reward_ratio: float,
+    market_sentiment_score: float,
+    smart_money_signal: float,
+    relative_volume_60d: float,
+) -> float:
+    threshold = float(base_threshold)
+
+    if risk_reward_ratio < 0.0:
+        threshold += 0.14
+    elif risk_reward_ratio < 0.5:
+        threshold += 0.08
+    elif risk_reward_ratio > 1.3:
+        threshold -= 0.06
+    elif risk_reward_ratio > 0.8:
+        threshold -= 0.03
+
+    if market_sentiment_score <= -0.20:
+        threshold += 0.05
+    elif market_sentiment_score >= 0.20:
+        threshold -= 0.03
+
+    if smart_money_signal <= -0.05:
+        threshold += 0.05
+    elif smart_money_signal >= 0.08:
+        threshold -= 0.02
+
+    if relative_volume_60d < 1.0:
+        threshold += 0.04
+
+    return float(np.clip(threshold, DYNAMIC_CONFIDENCE_MIN, DYNAMIC_CONFIDENCE_MAX))
+
+
+def _build_xai_top_reasons(
+    symbol: str,
+    action: str,
+    predicted_return_5d: float,
+    confidence_score: float,
+    dynamic_confidence_threshold: float,
+    risk_reward_ratio: float,
+    market_sentiment_score: float,
+    smart_money_signal: float,
+    relative_volume_60d: float,
+    alt_news_sentiment_score: float,
+    alt_urea_price: float,
+    alt_brent_price: float,
+    alt_news_influence_share: float,
+    alt_urea_influence_share: float,
+    alt_brent_influence_share: float,
+) -> list[str]:
+    scored_reasons: list[tuple[float, str]] = []
+    symbol_root = str(symbol or "").strip().upper().split(".")[0]
+
+    if predicted_return_5d >= 0.03:
+        scored_reasons.append((0.98, f"Strong expected 5-day upside ({predicted_return_5d * 100.0:.2f}%)"))
+    elif predicted_return_5d > 0.0:
+        scored_reasons.append((0.90, f"Positive expected 5-day return ({predicted_return_5d * 100.0:.2f}%)"))
+    elif predicted_return_5d <= PREVENTIVE_SELL_THRESHOLD_5D:
+        scored_reasons.append((0.99, f"Large expected 5-day downside ({predicted_return_5d * 100.0:.2f}%)"))
+    else:
+        scored_reasons.append((0.85, f"Negative expected 5-day return ({predicted_return_5d * 100.0:.2f}%)"))
+
+    confidence_gap = float(confidence_score - dynamic_confidence_threshold)
+    if confidence_gap >= 0.08:
+        scored_reasons.append(
+            (
+                0.94,
+                f"Confidence {confidence_score:.2f} is comfortably above dynamic threshold {dynamic_confidence_threshold:.2f}",
+            )
+        )
+    elif confidence_gap >= 0.0:
+        scored_reasons.append(
+            (
+                0.88,
+                f"Confidence {confidence_score:.2f} meets dynamic threshold {dynamic_confidence_threshold:.2f}",
+            )
+        )
+    else:
+        scored_reasons.append(
+            (
+                0.93,
+                f"Confidence {confidence_score:.2f} is below dynamic threshold {dynamic_confidence_threshold:.2f}",
+            )
+        )
+
+    # Contextual alternative-data reasons are surfaced only for BUY cases with strong local feature influence.
+    if action == "BUY":
+        if (
+            symbol_root in BRENT_SYMBOL_ROOTS
+            and alt_brent_price > 0.0
+            and alt_brent_influence_share >= ALT_COMMODITY_INFLUENCE_THRESHOLD
+        ):
+            scored_reasons.append((1.06, "Brent crude price support"))
+
+        if (
+            symbol_root in UREA_SYMBOL_ROOTS
+            and alt_urea_price > 0.0
+            and alt_urea_influence_share >= ALT_COMMODITY_INFLUENCE_THRESHOLD
+        ):
+            scored_reasons.append((1.06, "Urea price support"))
+
+        if (
+            alt_news_sentiment_score > 0.0
+            and alt_news_influence_share >= ALT_NEWS_INFLUENCE_THRESHOLD
+        ):
+            scored_reasons.append((1.04, "Favorable macro news sentiment"))
+
+    if smart_money_signal >= 0.05 and relative_volume_60d >= 1.0:
+        scored_reasons.append((0.86, "Smart-money flow is supportive (volume and flow signal are positive)"))
+    elif smart_money_signal <= -0.05:
+        scored_reasons.append((0.90, "Smart-money flow is weak; confidence was downscaled"))
+    elif relative_volume_60d < 1.0:
+        scored_reasons.append((0.84, "Relative volume is below normal; smart-money filter reduced conviction"))
+
+    if market_sentiment_score >= 0.20:
+        scored_reasons.append((0.82, f"Market sentiment proxy is supportive ({market_sentiment_score:.2f})"))
+    elif market_sentiment_score <= -0.20:
+        scored_reasons.append((0.88, f"Market sentiment proxy is risk-off ({market_sentiment_score:.2f})"))
+
+    if risk_reward_ratio >= 1.0:
+        scored_reasons.append((0.83, f"Risk/reward ratio is favorable ({risk_reward_ratio:.2f})"))
+    elif risk_reward_ratio <= 0.30:
+        scored_reasons.append((0.87, f"Risk/reward ratio is weak ({risk_reward_ratio:.2f})"))
+
+    deduped: list[str] = []
+    for _, reason in sorted(scored_reasons, key=lambda item: item[0], reverse=True):
+        if reason in deduped:
+            continue
+        deduped.append(reason)
+        if len(deduped) >= 3:
+            break
+
+    return deduped
 
 
 def _build_sector_index_map(symbols: list[str], sectors: dict[str, str]) -> dict[str, list[int]]:

@@ -54,6 +54,16 @@ class SymbolForecast:
     predicted_return_5d: float
     confidence_score: float
     model_accuracy: float
+    relative_volume_60d: float
+    market_sentiment_score: float
+    smart_money_signal: float
+    global_factor_corr_sp500: float
+    alt_news_sentiment_score: float
+    alt_urea_price: float
+    alt_brent_price: float
+    alt_news_influence_share: float
+    alt_urea_influence_share: float
+    alt_brent_influence_share: float
 
 
 @dataclass(frozen=True)
@@ -177,6 +187,44 @@ def _estimate_tree_uncertainty_std(model: XGBRegressor, x_row: pd.DataFrame) -> 
         return float(np.std(np.array(per_tree_margins, dtype=float)))
     except Exception:  # noqa: BLE001
         return 0.0
+
+
+def _compute_local_feature_influence_shares(
+    model: XGBRegressor,
+    x_row: pd.DataFrame,
+    feature_columns: list[str],
+) -> dict[str, float]:
+    try:
+        importance = getattr(model, "feature_importances_", None)
+        if importance is None:
+            return {
+                "alt_news_influence_share": 0.0,
+                "alt_urea_influence_share": 0.0,
+                "alt_brent_influence_share": 0.0,
+            }
+
+        importance_series = pd.Series(np.asarray(importance, dtype=float), index=feature_columns, dtype=float)
+        row = x_row.iloc[0]
+        contribution = (row.abs() * importance_series).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        total = float(contribution.sum())
+        if total <= 1e-12:
+            return {
+                "alt_news_influence_share": 0.0,
+                "alt_urea_influence_share": 0.0,
+                "alt_brent_influence_share": 0.0,
+            }
+
+        return {
+            "alt_news_influence_share": float(contribution.get("alt_news_sentiment_score", 0.0) / total),
+            "alt_urea_influence_share": float(contribution.get("alt_urea_price", 0.0) / total),
+            "alt_brent_influence_share": float(contribution.get("alt_brent_price", 0.0) / total),
+        }
+    except Exception:  # noqa: BLE001
+        return {
+            "alt_news_influence_share": 0.0,
+            "alt_urea_influence_share": 0.0,
+            "alt_brent_influence_share": 0.0,
+        }
 
 
 def train_xgboost_models(
@@ -523,6 +571,7 @@ def predict_symbol_forecasts(
         tree_uncertainty_std = _estimate_tree_uncertainty_std(model, x_row)
         uncertainty_confidence = float(1.0 / (1.0 + (tree_uncertainty_std * 18.0)))
         confidence = float(np.clip((0.55 * symbol_accuracy) + (0.45 * uncertainty_confidence), 0.0, 1.0))
+        influence_shares = _compute_local_feature_influence_shares(model, x_row, feature_columns)
 
         forecasts[symbol] = SymbolForecast(
             symbol=symbol,
@@ -530,6 +579,16 @@ def predict_symbol_forecasts(
             predicted_return_5d=predicted_return,
             confidence_score=confidence,
             model_accuracy=symbol_accuracy,
+            relative_volume_60d=_safe_float(latest_row.get("relative_volume_60d"), 1.0),
+            market_sentiment_score=_safe_float(latest_row.get("market_sentiment_score"), 0.0),
+            smart_money_signal=_safe_float(latest_row.get("smart_money_signal"), 0.0),
+            global_factor_corr_sp500=_safe_float(latest_row.get("global_factor_corr_sp500"), 0.0),
+            alt_news_sentiment_score=_safe_float(latest_row.get("alt_news_sentiment_score"), 0.0),
+            alt_urea_price=_safe_float(latest_row.get("alt_urea_price"), 0.0),
+            alt_brent_price=_safe_float(latest_row.get("alt_brent_price"), 0.0),
+            alt_news_influence_share=_safe_float(influence_shares.get("alt_news_influence_share"), 0.0),
+            alt_urea_influence_share=_safe_float(influence_shares.get("alt_urea_influence_share"), 0.0),
+            alt_brent_influence_share=_safe_float(influence_shares.get("alt_brent_influence_share"), 0.0),
         )
         accuracy_values.append(symbol_accuracy)
 

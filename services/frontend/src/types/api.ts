@@ -95,6 +95,7 @@ export interface PortfolioRecommendation {
   symbol?: string;
   action?: string;
   reason?: string;
+  topReasons?: string[];
   predictedReturn5d?: number;
   confidenceScore?: number;
 }

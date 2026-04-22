@@ -16,6 +16,9 @@ public class AiRecommendationItem {
     @JsonProperty("confidence_score")
     private BigDecimal confidenceScore;
 
+    @JsonProperty("top_reasons")
+    private java.util.List<String> topReasons;
+
     public String getSymbol() {
         return symbol;
     }
