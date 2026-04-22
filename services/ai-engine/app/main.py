@@ -750,17 +750,17 @@ def _build_xai_top_reasons(
     alt_urea_influence_share: float,
     alt_brent_influence_share: float,
 ) -> list[str]:
-    scored_reasons: list[tuple[float, str]] = []
+    scored_reasons: list[tuple[float, str, float | None]] = []
     symbol_root = str(symbol or "").strip().upper().split(".")[0]
 
     if predicted_return_5d >= 0.03:
-        scored_reasons.append((0.98, f"Strong expected 5-day upside ({predicted_return_5d * 100.0:.2f}%)"))
+        scored_reasons.append((0.98, f"Strong expected 5-day upside ({predicted_return_5d * 100.0:.2f}%)", None))
     elif predicted_return_5d > 0.0:
-        scored_reasons.append((0.90, f"Positive expected 5-day return ({predicted_return_5d * 100.0:.2f}%)"))
+        scored_reasons.append((0.90, f"Positive expected 5-day return ({predicted_return_5d * 100.0:.2f}%)", None))
     elif predicted_return_5d <= PREVENTIVE_SELL_THRESHOLD_5D:
-        scored_reasons.append((0.99, f"Large expected 5-day downside ({predicted_return_5d * 100.0:.2f}%)"))
+        scored_reasons.append((0.99, f"Large expected 5-day downside ({predicted_return_5d * 100.0:.2f}%)", None))
     else:
-        scored_reasons.append((0.85, f"Negative expected 5-day return ({predicted_return_5d * 100.0:.2f}%)"))
+        scored_reasons.append((0.85, f"Negative expected 5-day return ({predicted_return_5d * 100.0:.2f}%)", None))
 
     confidence_gap = float(confidence_score - dynamic_confidence_threshold)
     if confidence_gap >= 0.08:
@@ -768,6 +768,7 @@ def _build_xai_top_reasons(
             (
                 0.94,
                 f"Confidence {confidence_score:.2f} is comfortably above dynamic threshold {dynamic_confidence_threshold:.2f}",
+                None,
             )
         )
     elif confidence_gap >= 0.0:
@@ -775,6 +776,7 @@ def _build_xai_top_reasons(
             (
                 0.88,
                 f"Confidence {confidence_score:.2f} meets dynamic threshold {dynamic_confidence_threshold:.2f}",
+                None,
             )
         )
     else:
@@ -782,6 +784,7 @@ def _build_xai_top_reasons(
             (
                 0.93,
                 f"Confidence {confidence_score:.2f} is below dynamic threshold {dynamic_confidence_threshold:.2f}",
+                None,
             )
         )
 
@@ -792,47 +795,66 @@ def _build_xai_top_reasons(
             and alt_brent_price > 0.0
             and alt_brent_influence_share >= ALT_COMMODITY_INFLUENCE_THRESHOLD
         ):
-            scored_reasons.append((1.06, "Brent crude price support"))
+            scored_reasons.append((1.06, "Brent crude price support", max(0.0, alt_brent_influence_share * 100.0)))
 
         if (
             symbol_root in UREA_SYMBOL_ROOTS
             and alt_urea_price > 0.0
             and alt_urea_influence_share >= ALT_COMMODITY_INFLUENCE_THRESHOLD
         ):
-            scored_reasons.append((1.06, "Urea price support"))
+            scored_reasons.append((1.06, "Urea price support", max(0.0, alt_urea_influence_share * 100.0)))
 
         if (
             alt_news_sentiment_score > 0.0
             and alt_news_influence_share >= ALT_NEWS_INFLUENCE_THRESHOLD
         ):
-            scored_reasons.append((1.04, "Favorable macro news sentiment"))
+            scored_reasons.append((1.04, "Favorable macro news sentiment", max(0.0, alt_news_influence_share * 100.0)))
 
     if smart_money_signal >= 0.05 and relative_volume_60d >= 1.0:
-        scored_reasons.append((0.86, "Smart-money flow is supportive (volume and flow signal are positive)"))
+        scored_reasons.append((0.86, "Smart-money flow is supportive (volume and flow signal are positive)", None))
     elif smart_money_signal <= -0.05:
-        scored_reasons.append((0.90, "Smart-money flow is weak; confidence was downscaled"))
+        scored_reasons.append((0.90, "Smart-money flow is weak; confidence was downscaled", None))
     elif relative_volume_60d < 1.0:
-        scored_reasons.append((0.84, "Relative volume is below normal; smart-money filter reduced conviction"))
+        scored_reasons.append((0.84, "Relative volume is below normal; smart-money filter reduced conviction", None))
 
     if market_sentiment_score >= 0.20:
-        scored_reasons.append((0.82, f"Market sentiment proxy is supportive ({market_sentiment_score:.2f})"))
+        scored_reasons.append((0.82, f"Market sentiment proxy is supportive ({market_sentiment_score:.2f})", None))
     elif market_sentiment_score <= -0.20:
-        scored_reasons.append((0.88, f"Market sentiment proxy is risk-off ({market_sentiment_score:.2f})"))
+        scored_reasons.append((0.88, f"Market sentiment proxy is risk-off ({market_sentiment_score:.2f})", None))
 
     if risk_reward_ratio >= 1.0:
-        scored_reasons.append((0.83, f"Risk/reward ratio is favorable ({risk_reward_ratio:.2f})"))
+        scored_reasons.append((0.83, f"Risk/reward ratio is favorable ({risk_reward_ratio:.2f})", None))
     elif risk_reward_ratio <= 0.30:
-        scored_reasons.append((0.87, f"Risk/reward ratio is weak ({risk_reward_ratio:.2f})"))
+        scored_reasons.append((0.87, f"Risk/reward ratio is weak ({risk_reward_ratio:.2f})", None))
 
-    deduped: list[str] = []
-    for _, reason in sorted(scored_reasons, key=lambda item: item[0], reverse=True):
-        if reason in deduped:
+    top_entries: list[tuple[float, str, float | None]] = []
+    seen_reasons: set[str] = set()
+    for score, reason, impact_pct in sorted(scored_reasons, key=lambda item: item[0], reverse=True):
+        if reason in seen_reasons:
             continue
-        deduped.append(reason)
-        if len(deduped) >= 3:
+        seen_reasons.add(reason)
+        top_entries.append((score, reason, impact_pct))
+        if len(top_entries) >= 3:
             break
 
-    return deduped
+    if not top_entries:
+        return []
+
+    known_impact_total = float(sum((entry[2] or 0.0) for entry in top_entries if entry[2] is not None))
+    unknown_entries = [(idx, entry) for idx, entry in enumerate(top_entries) if entry[2] is None]
+    unknown_score_total = float(sum(entry[0] for _, entry in unknown_entries))
+    remaining_impact = float(max(0.0, 100.0 - known_impact_total))
+
+    resolved_reasons: list[str] = []
+    for score, reason, impact_pct in top_entries:
+        if impact_pct is None:
+            if unknown_score_total > 1e-9:
+                impact_pct = float(remaining_impact * (score / unknown_score_total))
+            else:
+                impact_pct = 0.0
+        resolved_reasons.append(f"{reason} (Impact: {impact_pct:.1f}%)")
+
+    return resolved_reasons
 
 
 def _build_sector_index_map(symbols: list[str], sectors: dict[str, str]) -> dict[str, list[int]]:

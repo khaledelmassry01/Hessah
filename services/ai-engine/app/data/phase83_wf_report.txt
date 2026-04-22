@@ -1,0 +1,385 @@
+﻿FINAL_TRAINING_DF_SAMPLE
+ symbol trade_date  open_price  high_price  low_price  close_price  volume canonical_symbol sector_code  daily_return    ema_20    ema_50   ema_200      macd  macd_signal  macd_hist  bollinger_mid_20  bollinger_upper_20  bollinger_lower_20    rsi_14   atr_14  volume_20d_avg  volume_shock_20d  volume_60d_avg  relative_volume_60d  usd_egp_close  gold_usd_close  cbe_policy_rate_pct  cbe_rate_changed  usd_egp_return  gold_return  alt_urea_price  alt_urea_return_1d  alt_urea_return_5d  alt_urea_zscore_20d  alt_brent_price  alt_brent_return_1d  alt_brent_return_5d  alt_brent_zscore_20d  alt_news_sentiment_score  market_sentiment_score  global_factor_corr_sp500  smart_money_signal  stock_usd_corr_20d  sector_momentum_5d  target_forward_return_5d
+ALCN.CA 2016-02-01        2.64        2.64       2.64         2.64 1018678          ALCN.CA INDUSTRIALS      0.100000  2.469719  2.512613  2.558771 -0.021855    -0.038250   0.016395            2.4650            2.642645            2.287355 57.652099 0.106429       245771.60          3.144816       245771.60             4.144816         7.7554     1127.900024                10.75                 0       -0.006533     0.011026             0.0                 0.0                 0.0                  0.0              0.0                  0.0                  0.0                   0.0                       0.0                 0.24254                  0.309527            0.118136           -0.124362            0.010009                  0.049242
+AMOC.CA 2016-02-01        1.57        1.59       1.56         1.58  568785          AMOC.CA      ENERGY     -0.024691  1.633466  1.670743  1.692942 -0.037142    -0.031947  -0.005195            1.6660            1.913037            1.418963 41.762143 0.086429      1397460.15         -0.592987      1397460.15             0.407013         7.7554     1127.900024                10.75                 0       -0.006533     0.011026             0.0                 0.0                 0.0                  0.0              0.0                  0.0                  0.0                   0.0                       0.0                 0.24254                  0.309527            0.118136            0.313466           -0.002367                 -0.031646
+AUTO.CA 2016-02-01        2.60        2.60       2.53         2.57 1969467          AUTO.CA    CONSUMER     -0.022814  2.882759  3.159837  3.410255 -0.217956    -0.201621  -0.016335            2.9315            3.580719            2.282281 16.959866 0.190714      1887552.35          0.043397      1887552.35             1.043397         7.7554     1127.900024                10.75                 0       -0.006533     0.011026             0.0                 0.0                 0.0                  0.0              0.0                  0.0                  0.0                   0.0                       0.0                 0.24254                  0.309527            0.118136           -0.256892            0.006089                  0.011673
+CCAP.CA 2016-02-01        1.28        1.30       1.27         1.29 3627909          CCAP.CA    FIN_SERV     -0.022727  1.364405  1.461378  1.556856 -0.066761    -0.072028   0.005266            1.3670            1.611441            1.122559 23.239487 0.084286     12658425.35         -0.713400     12658425.35             0.286600         7.7554     1127.900024                10.75                 0       -0.006533     0.011026             0.0                 0.0                 0.0                  0.0              0.0                  0.0                  0.0                   0.0                       0.0                 0.24254                  0.309527            0.118136            0.001550            0.003802                  0.015504
+COMI.CA 2016-02-01       11.25       11.42      11.24        11.40 4102115          COMI.CA       BANKS     -0.010417 12.085305 12.972717 13.790413 -0.667311    -0.664448  -0.002863           12.2210           14.486707            9.955293 27.175400 0.642857      6349878.65         -0.353985      6349878.65             0.646015         7.7554     1127.900024                10.75                 0       -0.006533     0.011026             0.0                 0.0                 0.0                  0.0              0.0                  0.0                  0.0                   0.0                       0.0                 0.24254                  0.309527            0.118136           -0.067277           -0.000236                  0.096491
+TOP_10_FEATURE_IMPORTANCE
+                 feature  importance
+          usd_egp_return    0.222167
+     cbe_policy_rate_pct    0.097359
+        cbe_rate_changed    0.087490
+             gold_return    0.081011
+global_factor_corr_sp500    0.018275
+  market_sentiment_score    0.015855
+      smart_money_signal    0.015841
+      bollinger_upper_20    0.015438
+      bollinger_lower_20    0.014954
+                 ema_200    0.014614
+usd_egp_return_rank=1
+USD_CONTEXT_CHECK=PASS
+SYMBOL_THRESHOLDS
+{"ABUK.CA": 0.36, "ALCN.CA": 0.36, "AMOC.CA": 0.36, "AUTO.CA": 0.36, "BTFH.CA": 0.36, "CCAP.CA": 0.36, "CIEB.CA": 0.36, "CLHO.CA": 0.36, "COMI.CA": 0.36, "DOMT.CA": 0.36, "EAST.CA": 0.36, "EFIH.CA": 0.36, "EKHO.CA": 0.36, "ETEL.CA": 0.36, "FWRY.CA": 0.36, "GDWA.CA": 0.36, "HELI.CA": 0.36, "HRHO.CA": 0.36, "JUFO.CA": 0.36, "MFPC.CA": 0.36, "MICH.CA": 0.36, "OBRI.CA": 0.36, "ORAS.CA": 0.36, "ORHD.CA": 0.36, "ORWE.CA": 0.36, "PHDC.CA": 0.36, "RAYA.CA": 0.36, "SKPC.CA": 0.36, "SWDY.CA": 0.36, "TMGH.CA": 0.36}
+WALK_FORWARD_BLOCK_LOGS
+{"block_id": 1, "block_start_date": "2025-01-02", "block_end_date": "2025-02-02", "train_rows": 58800, "test_rows": 588, "rmse": 0.04582989626901233, "directional_accuracy_regression": 0.467687074829932, "directional_accuracy_classification_raw": 0.5629251700680272, "directional_accuracy_classification": 0.576530612244898, "precision_at_threshold": 0.6875, "buy_rate_at_threshold": 0.05442176870748299, "guardrail_forced_no_buy": 0, "turbulent_test_share": 0.07993197278911565}
+{"block_id": 2, "block_start_date": "2025-02-03", "block_end_date": "2025-03-03", "train_rows": 59360, "test_rows": 588, "rmse": 0.04203132121511135, "directional_accuracy_regression": 0.4744897959183674, "directional_accuracy_classification_raw": 0.46598639455782315, "directional_accuracy_classification": 0.46258503401360546, "precision_at_threshold": 0.5, "buy_rate_at_threshold": 0.061224489795918366, "guardrail_forced_no_buy": 0, "turbulent_test_share": 0.17006802721088435}
+{"block_id": 3, "block_start_date": "2025-03-04", "block_end_date": "2025-04-07", "train_rows": 59948, "test_rows": 588, "rmse": 0.05837552576770512, "directional_accuracy_regression": 0.4064625850340136, "directional_accuracy_classification_raw": 0.5833333333333334, "directional_accuracy_classification": 0.5799319727891157, "precision_at_threshold": 0.5238095238095238, "buy_rate_at_threshold": 0.07142857142857142, "guardrail_forced_no_buy": 0, "turbulent_test_share": 0.06292517006802721}
+{"block_id": 4, "block_start_date": "2025-04-08", "block_end_date": "2025-05-12", "train_rows": 60564, "test_rows": 588, "rmse": 0.04660735391644966, "directional_accuracy_regression": 0.5340136054421769, "directional_accuracy_classification_raw": 0.5340136054421769, "directional_accuracy_classification": 0.5272108843537415, "precision_at_threshold": 0.64, "buy_rate_at_threshold": 0.12755102040816327, "guardrail_forced_no_buy": 0, "turbulent_test_share": 0.05782312925170068}
+{"block_id": 5, "block_start_date": "2025-05-13", "block_end_date": "2025-06-15", "train_rows": 61124, "test_rows": 618, "rmse": 0.06389833011262981, "directional_accuracy_regression": 0.5080906148867314, "directional_accuracy_classification_raw": 0.587378640776699, "directional_accuracy_classification": 0.587378640776699, "precision_at_threshold": 0.3611111111111111, "buy_rate_at_threshold": 0.05825242718446602, "guardrail_forced_no_buy": 0, "turbulent_test_share": 0.04854368932038835}
+{"block_id": 6, "block_start_date": "2025-06-16", "block_end_date": "2025-07-17", "train_rows": 61734, "test_rows": 630, "rmse": 0.05688747917413416, "directional_accuracy_regression": 0.5492063492063493, "directional_accuracy_classification_raw": 0.35873015873015873, "directional_accuracy_classification": 0.353968253968254, "precision_at_threshold": 0.5972222222222222, "buy_rate_at_threshold": 0.11428571428571428, "guardrail_forced_no_buy": 1, "turbulent_test_share": 0.01904761904761905}
+{"block_id": 7, "block_start_date": "2025-07-20", "block_end_date": "2025-08-18", "train_rows": 62394, "test_rows": 630, "rmse": 0.0488934974900458, "directional_accuracy_regression": 0.5031746031746032, "directional_accuracy_classification_raw": 0.4793650793650794, "directional_accuracy_classification": 0.48412698412698413, "precision_at_threshold": 0.5, "buy_rate_at_threshold": 0.05396825396825397, "guardrail_forced_no_buy": 0, "turbulent_test_share": 0.08888888888888889}
+{"block_id": 8, "block_start_date": "2025-08-19", "block_end_date": "2025-09-17", "train_rows": 62994, "test_rows": 630, "rmse": 0.04170336462959719, "directional_accuracy_regression": 0.4634920634920635, "directional_accuracy_classification_raw": 0.5634920634920635, "directional_accuracy_classification": 0.5714285714285714, "precision_at_threshold": 0.4583333333333333, "buy_rate_at_threshold": 0.0380952380952381, "guardrail_forced_no_buy": 0, "turbulent_test_share": 0.10317460317460317}
+{"block_id": 9, "block_start_date": "2025-09-18", "block_end_date": "2025-10-16", "train_rows": 63624, "test_rows": 601, "rmse": 0.08528537706075415, "directional_accuracy_regression": 0.4858569051580699, "directional_accuracy_classification_raw": 0.3826955074875208, "directional_accuracy_classification": 0.3843594009983361, "precision_at_threshold": 0.782608695652174, "buy_rate_at_threshold": 0.07653910149750416, "guardrail_forced_no_buy": 1, "turbulent_test_share": 0.13477537437603992}
+{"block_id": 10, "block_start_date": "2025-10-19", "block_end_date": "2025-11-16", "train_rows": 64255, "test_rows": 630, "rmse": 0.05467058536809316, "directional_accuracy_regression": 0.5555555555555556, "directional_accuracy_classification_raw": 0.48253968253968255, "directional_accuracy_classification": 0.5079365079365079, "precision_at_threshold": 0.4909090909090909, "buy_rate_at_threshold": 0.0873015873015873, "guardrail_forced_no_buy": 2, "turbulent_test_share": 0.23174603174603176}
+{"block_id": 11, "block_start_date": "2025-11-17", "block_end_date": "2025-12-15", "train_rows": 64855, "test_rows": 630, "rmse": 0.06756308318840484, "directional_accuracy_regression": 0.48095238095238096, "directional_accuracy_classification_raw": 0.4666666666666667, "directional_accuracy_classification": 0.4714285714285714, "precision_at_threshold": 0.4666666666666667, "buy_rate_at_threshold": 0.07142857142857142, "guardrail_forced_no_buy": 9, "turbulent_test_share": 0.03650793650793651}
+{"block_id": 12, "block_start_date": "2025-12-16", "block_end_date": "2026-01-15", "train_rows": 65485, "test_rows": 630, "rmse": 0.04672438341494957, "directional_accuracy_regression": 0.5206349206349207, "directional_accuracy_classification_raw": 0.5111111111111111, "directional_accuracy_classification": 0.5158730158730159, "precision_at_threshold": 0.41935483870967744, "buy_rate_at_threshold": 0.049206349206349205, "guardrail_forced_no_buy": 8, "turbulent_test_share": 0.11587301587301588}
+{"block_id": 13, "block_start_date": "2026-01-18", "block_end_date": "2026-02-16", "train_rows": 66145, "test_rows": 630, "rmse": 0.05314530441700082, "directional_accuracy_regression": 0.6301587301587301, "directional_accuracy_classification_raw": 0.4174603174603175, "directional_accuracy_classification": 0.4015873015873016, "precision_at_threshold": 0.7536231884057971, "buy_rate_at_threshold": 0.10952380952380952, "guardrail_forced_no_buy": 1, "turbulent_test_share": 0.06984126984126984}
+{"block_id": 14, "block_start_date": "2026-02-17", "block_end_date": "2026-03-17", "train_rows": 66745, "test_rows": 630, "rmse": 0.19400291708724401, "directional_accuracy_regression": 0.4142857142857143, "directional_accuracy_classification_raw": 0.5063492063492063, "directional_accuracy_classification": 0.5523809523809524, "precision_at_threshold": 0.3680555555555556, "buy_rate_at_threshold": 0.22857142857142856, "guardrail_forced_no_buy": 3, "turbulent_test_share": 0.16984126984126985}
+{"block_id": 15, "block_start_date": "2026-03-18", "block_end_date": "2026-04-12", "train_rows": 67375, "test_rows": 476, "rmse": 0.2389234943105519, "directional_accuracy_regression": 0.47689075630252103, "directional_accuracy_classification_raw": 0.4054621848739496, "directional_accuracy_classification": 0.37184873949579833, "precision_at_threshold": 0.4915254237288136, "buy_rate_at_threshold": 0.12394957983193278, "guardrail_forced_no_buy": 3, "turbulent_test_share": 0.012605042016806723}
+WALK_FORWARD_METRICS
+{
+  "walk_forward": {
+    "rmse": 0.0913848271198076,
+    "directional_accuracy_regression": 0.4989545504566964,
+    "directional_accuracy_classification": 0.49125123803235393,
+    "Backtest_Accuracy_Score": 0.49125123803235393,
+    "global_threshold": 0.525,
+    "precision_at_threshold": 0.53125,
+    "buy_rate_at_threshold": 0.08803785627819963,
+    "high_confidence_threshold": 0.62,
+    "high_confidence_target_buy_rate_min": 0.01,
+    "high_confidence_target_buy_rate_max": 0.02,
+    "high_confidence_target_precision_min": 0.65,
+    "high_confidence_stop_loss_pct": 0.05,
+    "high_confidence_precision": 0.564625850340136,
+    "high_confidence_buy_rate": 0.01617695609111918,
+    "high_confidence_target_met": false,
+    "cumulative_profit_high_confidence_raw": 1.2549740219814955,
+    "cumulative_profit_high_confidence": 2.066326137627835,
+    "symbol_threshold_count": 30,
+    "confidence_guard_activation_rate": 0.09475074281941234,
+    "rows_evaluated": 9087,
+    "blocks_trained": 15,
+    "train_period": {
+      "from": "2016-01-01",
+      "to": "2024-12-31"
+    },
+    "blind_period": {
+      "from": "2025-01-01",
+      "to": "2026-04-30"
+    },
+    "training_hyperparameters": {
+      "n_estimators": 1000,
+      "learning_rate": 0.01,
+      "max_depth": 8,
+      "subsample": 0.8
+    }
+  },
+  "feature_importance_top_10": [
+    {
+      "feature": "usd_egp_return",
+      "importance": 0.22216659953478252
+    },
+    {
+      "feature": "cbe_policy_rate_pct",
+      "importance": 0.0973590514425899
+    },
+    {
+      "feature": "cbe_rate_changed",
+      "importance": 0.08748995565607325
+    },
+    {
+      "feature": "gold_return",
+      "importance": 0.08101055767608145
+    },
+    {
+      "feature": "global_factor_corr_sp500",
+      "importance": 0.01827471271482565
+    },
+    {
+      "feature": "market_sentiment_score",
+      "importance": 0.0158553393498779
+    },
+    {
+      "feature": "smart_money_signal",
+      "importance": 0.01584129628865379
+    },
+    {
+      "feature": "bollinger_upper_20",
+      "importance": 0.015437896265263335
+    },
+    {
+      "feature": "bollinger_lower_20",
+      "importance": 0.014954010167655237
+    },
+    {
+      "feature": "ema_200",
+      "importance": 0.014613581761310336
+    }
+  ],
+  "usd_egp_return_rank": 1,
+  "symbol_thresholds": {
+    "ABUK.CA": 0.36,
+    "ALCN.CA": 0.36,
+    "AMOC.CA": 0.36,
+    "AUTO.CA": 0.36,
+    "BTFH.CA": 0.36,
+    "CCAP.CA": 0.36,
+    "CIEB.CA": 0.36,
+    "CLHO.CA": 0.36,
+    "COMI.CA": 0.36,
+    "DOMT.CA": 0.36,
+    "EAST.CA": 0.36,
+    "EFIH.CA": 0.36,
+    "EKHO.CA": 0.36,
+    "ETEL.CA": 0.36,
+    "FWRY.CA": 0.36,
+    "GDWA.CA": 0.36,
+    "HELI.CA": 0.36,
+    "HRHO.CA": 0.36,
+    "JUFO.CA": 0.36,
+    "MFPC.CA": 0.36,
+    "MICH.CA": 0.36,
+    "OBRI.CA": 0.36,
+    "ORAS.CA": 0.36,
+    "ORHD.CA": 0.36,
+    "ORWE.CA": 0.36,
+    "PHDC.CA": 0.36,
+    "RAYA.CA": 0.36,
+    "SKPC.CA": 0.36,
+    "SWDY.CA": 0.36,
+    "TMGH.CA": 0.36
+  },
+  "block_logs": [
+    {
+      "block_id": 1,
+      "block_start_date": "2025-01-02",
+      "block_end_date": "2025-02-02",
+      "train_rows": 58800,
+      "test_rows": 588,
+      "rmse": 0.04582989626901233,
+      "directional_accuracy_regression": 0.467687074829932,
+      "directional_accuracy_classification_raw": 0.5629251700680272,
+      "directional_accuracy_classification": 0.576530612244898,
+      "precision_at_threshold": 0.6875,
+      "buy_rate_at_threshold": 0.05442176870748299,
+      "guardrail_forced_no_buy": 0,
+      "turbulent_test_share": 0.07993197278911565
+    },
+    {
+      "block_id": 2,
+      "block_start_date": "2025-02-03",
+      "block_end_date": "2025-03-03",
+      "train_rows": 59360,
+      "test_rows": 588,
+      "rmse": 0.04203132121511135,
+      "directional_accuracy_regression": 0.4744897959183674,
+      "directional_accuracy_classification_raw": 0.46598639455782315,
+      "directional_accuracy_classification": 0.46258503401360546,
+      "precision_at_threshold": 0.5,
+      "buy_rate_at_threshold": 0.061224489795918366,
+      "guardrail_forced_no_buy": 0,
+      "turbulent_test_share": 0.17006802721088435
+    },
+    {
+      "block_id": 3,
+      "block_start_date": "2025-03-04",
+      "block_end_date": "2025-04-07",
+      "train_rows": 59948,
+      "test_rows": 588,
+      "rmse": 0.05837552576770512,
+      "directional_accuracy_regression": 0.4064625850340136,
+      "directional_accuracy_classification_raw": 0.5833333333333334,
+      "directional_accuracy_classification": 0.5799319727891157,
+      "precision_at_threshold": 0.5238095238095238,
+      "buy_rate_at_threshold": 0.07142857142857142,
+      "guardrail_forced_no_buy": 0,
+      "turbulent_test_share": 0.06292517006802721
+    },
+    {
+      "block_id": 4,
+      "block_start_date": "2025-04-08",
+      "block_end_date": "2025-05-12",
+      "train_rows": 60564,
+      "test_rows": 588,
+      "rmse": 0.04660735391644966,
+      "directional_accuracy_regression": 0.5340136054421769,
+      "directional_accuracy_classification_raw": 0.5340136054421769,
+      "directional_accuracy_classification": 0.5272108843537415,
+      "precision_at_threshold": 0.64,
+      "buy_rate_at_threshold": 0.12755102040816327,
+      "guardrail_forced_no_buy": 0,
+      "turbulent_test_share": 0.05782312925170068
+    },
+    {
+      "block_id": 5,
+      "block_start_date": "2025-05-13",
+      "block_end_date": "2025-06-15",
+      "train_rows": 61124,
+      "test_rows": 618,
+      "rmse": 0.06389833011262981,
+      "directional_accuracy_regression": 0.5080906148867314,
+      "directional_accuracy_classification_raw": 0.587378640776699,
+      "directional_accuracy_classification": 0.587378640776699,
+      "precision_at_threshold": 0.3611111111111111,
+      "buy_rate_at_threshold": 0.05825242718446602,
+      "guardrail_forced_no_buy": 0,
+      "turbulent_test_share": 0.04854368932038835
+    },
+    {
+      "block_id": 6,
+      "block_start_date": "2025-06-16",
+      "block_end_date": "2025-07-17",
+      "train_rows": 61734,
+      "test_rows": 630,
+      "rmse": 0.05688747917413416,
+      "directional_accuracy_regression": 0.5492063492063493,
+      "directional_accuracy_classification_raw": 0.35873015873015873,
+      "directional_accuracy_classification": 0.353968253968254,
+      "precision_at_threshold": 0.5972222222222222,
+      "buy_rate_at_threshold": 0.11428571428571428,
+      "guardrail_forced_no_buy": 1,
+      "turbulent_test_share": 0.01904761904761905
+    },
+    {
+      "block_id": 7,
+      "block_start_date": "2025-07-20",
+      "block_end_date": "2025-08-18",
+      "train_rows": 62394,
+      "test_rows": 630,
+      "rmse": 0.0488934974900458,
+      "directional_accuracy_regression": 0.5031746031746032,
+      "directional_accuracy_classification_raw": 0.4793650793650794,
+      "directional_accuracy_classification": 0.48412698412698413,
+      "precision_at_threshold": 0.5,
+      "buy_rate_at_threshold": 0.05396825396825397,
+      "guardrail_forced_no_buy": 0,
+      "turbulent_test_share": 0.08888888888888889
+    },
+    {
+      "block_id": 8,
+      "block_start_date": "2025-08-19",
+      "block_end_date": "2025-09-17",
+      "train_rows": 62994,
+      "test_rows": 630,
+      "rmse": 0.04170336462959719,
+      "directional_accuracy_regression": 0.4634920634920635,
+      "directional_accuracy_classification_raw": 0.5634920634920635,
+      "directional_accuracy_classification": 0.5714285714285714,
+      "precision_at_threshold": 0.4583333333333333,
+      "buy_rate_at_threshold": 0.0380952380952381,
+      "guardrail_forced_no_buy": 0,
+      "turbulent_test_share": 0.10317460317460317
+    },
+    {
+      "block_id": 9,
+      "block_start_date": "2025-09-18",
+      "block_end_date": "2025-10-16",
+      "train_rows": 63624,
+      "test_rows": 601,
+      "rmse": 0.08528537706075415,
+      "directional_accuracy_regression": 0.4858569051580699,
+      "directional_accuracy_classification_raw": 0.3826955074875208,
+      "directional_accuracy_classification": 0.3843594009983361,
+      "precision_at_threshold": 0.782608695652174,
+      "buy_rate_at_threshold": 0.07653910149750416,
+      "guardrail_forced_no_buy": 1,
+      "turbulent_test_share": 0.13477537437603992
+    },
+    {
+      "block_id": 10,
+      "block_start_date": "2025-10-19",
+      "block_end_date": "2025-11-16",
+      "train_rows": 64255,
+      "test_rows": 630,
+      "rmse": 0.05467058536809316,
+      "directional_accuracy_regression": 0.5555555555555556,
+      "directional_accuracy_classification_raw": 0.48253968253968255,
+      "directional_accuracy_classification": 0.5079365079365079,
+      "precision_at_threshold": 0.4909090909090909,
+      "buy_rate_at_threshold": 0.0873015873015873,
+      "guardrail_forced_no_buy": 2,
+      "turbulent_test_share": 0.23174603174603176
+    },
+    {
+      "block_id": 11,
+      "block_start_date": "2025-11-17",
+      "block_end_date": "2025-12-15",
+      "train_rows": 64855,
+      "test_rows": 630,
+      "rmse": 0.06756308318840484,
+      "directional_accuracy_regression": 0.48095238095238096,
+      "directional_accuracy_classification_raw": 0.4666666666666667,
+      "directional_accuracy_classification": 0.4714285714285714,
+      "precision_at_threshold": 0.4666666666666667,
+      "buy_rate_at_threshold": 0.07142857142857142,
+      "guardrail_forced_no_buy": 9,
+      "turbulent_test_share": 0.03650793650793651
+    },
+    {
+      "block_id": 12,
+      "block_start_date": "2025-12-16",
+      "block_end_date": "2026-01-15",
+      "train_rows": 65485,
+      "test_rows": 630,
+      "rmse": 0.04672438341494957,
+      "directional_accuracy_regression": 0.5206349206349207,
+      "directional_accuracy_classification_raw": 0.5111111111111111,
+      "directional_accuracy_classification": 0.5158730158730159,
+      "precision_at_threshold": 0.41935483870967744,
+      "buy_rate_at_threshold": 0.049206349206349205,
+      "guardrail_forced_no_buy": 8,
+      "turbulent_test_share": 0.11587301587301588
+    },
+    {
+      "block_id": 13,
+      "block_start_date": "2026-01-18",
+      "block_end_date": "2026-02-16",
+      "train_rows": 66145,
+      "test_rows": 630,
+      "rmse": 0.05314530441700082,
+      "directional_accuracy_regression": 0.6301587301587301,
+      "directional_accuracy_classification_raw": 0.4174603174603175,
+      "directional_accuracy_classification": 0.4015873015873016,
+      "precision_at_threshold": 0.7536231884057971,
+      "buy_rate_at_threshold": 0.10952380952380952,
+      "guardrail_forced_no_buy": 1,
+      "turbulent_test_share": 0.06984126984126984
+    },
+    {
+      "block_id": 14,
+      "block_start_date": "2026-02-17",
+      "block_end_date": "2026-03-17",
+      "train_rows": 66745,
+      "test_rows": 630,
+      "rmse": 0.19400291708724401,
+      "directional_accuracy_regression": 0.4142857142857143,
+      "directional_accuracy_classification_raw": 0.5063492063492063,
+      "directional_accuracy_classification": 0.5523809523809524,
+      "precision_at_threshold": 0.3680555555555556,
+      "buy_rate_at_threshold": 0.22857142857142856,
+      "guardrail_forced_no_buy": 3,
+      "turbulent_test_share": 0.16984126984126985
+    },
+    {
+      "block_id": 15,
+      "block_start_date": "2026-03-18",
+      "block_end_date": "2026-04-12",
+      "train_rows": 67375,
+      "test_rows": 476,
+      "rmse": 0.2389234943105519,
+      "directional_accuracy_regression": 0.47689075630252103,
+      "directional_accuracy_classification_raw": 0.4054621848739496,
+      "directional_accuracy_classification": 0.37184873949579833,
+      "precision_at_threshold": 0.4915254237288136,
+      "buy_rate_at_threshold": 0.12394957983193278,
+      "guardrail_forced_no_buy": 3,
+      "turbulent_test_share": 0.012605042016806723
+    }
+  ],
+  "lstm_probe": {
+    "status": "UNAVAILABLE",
+    "message": "TensorFlow not available in runtime: No module named 'tensorflow'"
+  }
+}

@@ -61,7 +61,7 @@ HIGH_VOLATILITY_ATR_THRESHOLD = 0.05
 HIGH_CONFIDENCE_MIN_PROB = 0.70
 HIGH_CONFIDENCE_TARGET_MIN_BUY_RATE = 0.01
 HIGH_CONFIDENCE_TARGET_MAX_BUY_RATE = 0.02
-HIGH_CONFIDENCE_MIN_PRECISION_TARGET = 0.55
+HIGH_CONFIDENCE_MIN_PRECISION_TARGET = 0.65
 HIGH_CONFIDENCE_STOP_LOSS_PCT = 0.05
 SMART_MONEY_LOW_VOLUME_DOWNSCALE = 0.85
 
@@ -106,7 +106,13 @@ FEATURE_COLUMNS = [
     "cbe_rate_changed",
     "alt_news_sentiment_score",
     "alt_urea_price",
+    "alt_urea_return_1d",
+    "alt_urea_return_5d",
+    "alt_urea_zscore_20d",
     "alt_brent_price",
+    "alt_brent_return_1d",
+    "alt_brent_return_5d",
+    "alt_brent_zscore_20d",
 ]
 
 TARGET_COLUMN = "target_forward_return_5d"
@@ -569,6 +575,8 @@ def _select_high_confidence_threshold(prediction_frame: pd.DataFrame) -> float:
             continue
 
         buy_rate = float(signal_count / total_rows)
+        if buy_rate < HIGH_CONFIDENCE_TARGET_MIN_BUY_RATE:
+            continue
         precision = float(np.mean(actual_up[high_confidence_mask]))
         selected_returns = actual_returns[high_confidence_mask]
         selected_returns_capped = np.maximum(selected_returns, -HIGH_CONFIDENCE_STOP_LOSS_PCT)
@@ -591,20 +599,55 @@ def _select_high_confidence_threshold(prediction_frame: pd.DataFrame) -> float:
         for item in candidates
         if HIGH_CONFIDENCE_TARGET_MIN_BUY_RATE <= item["buy_rate"] <= HIGH_CONFIDENCE_TARGET_MAX_BUY_RATE
     ]
+    constrained = [
+        item
+        for item in candidates
+        if item["precision"] >= HIGH_CONFIDENCE_MIN_PRECISION_TARGET
+    ]
     in_band_with_precision = [
         item
-        for item in in_band
-        if item["precision"] >= HIGH_CONFIDENCE_MIN_PRECISION_TARGET
+        for item in constrained
+        if HIGH_CONFIDENCE_TARGET_MIN_BUY_RATE <= item["buy_rate"] <= HIGH_CONFIDENCE_TARGET_MAX_BUY_RATE
     ]
 
     if in_band_with_precision:
         selected = max(
             in_band_with_precision,
             key=lambda item: (
-                item["capped_cumulative_profit"],
                 item["precision"],
+                item["capped_cumulative_profit"],
                 -abs(item["buy_rate"] - target_mid),
-                item["threshold"],
+                -item["threshold"],
+            ),
+        )
+        return float(selected["threshold"])
+
+    if constrained:
+        selected = max(
+            constrained,
+            key=lambda item: (
+                item["precision"],
+                item["capped_cumulative_profit"],
+                -abs(item["buy_rate"] - target_mid),
+                -item["threshold"],
+            ),
+        )
+        return float(selected["threshold"])
+
+    in_band_with_best_precision = [
+        item
+        for item in in_band
+        if item["precision"] >= HIGH_CONFIDENCE_MIN_PRECISION_TARGET
+    ]
+
+    if in_band_with_best_precision:
+        selected = max(
+            in_band_with_best_precision,
+            key=lambda item: (
+                item["precision"],
+                item["capped_cumulative_profit"],
+                -abs(item["buy_rate"] - target_mid),
+                -item["threshold"],
             ),
         )
         return float(selected["threshold"])
@@ -616,18 +659,18 @@ def _select_high_confidence_threshold(prediction_frame: pd.DataFrame) -> float:
                 item["precision"],
                 item["capped_cumulative_profit"],
                 -abs(item["buy_rate"] - target_mid),
-                item["threshold"],
+                -item["threshold"],
             ),
         )
         return float(selected["threshold"])
 
-    selected = min(
+    selected = max(
         candidates,
         key=lambda item: (
-            abs(item["buy_rate"] - target_mid),
-            -item["precision"],
-            -item["capped_cumulative_profit"],
-            item["threshold"],
+            item["precision"],
+            item["capped_cumulative_profit"],
+            -abs(item["buy_rate"] - target_mid),
+            -item["threshold"],
         ),
     )
     return float(selected["threshold"])
@@ -909,12 +952,38 @@ def load_alternative_context(
         sentiment_frame = pd.read_sql(sql="\n".join(sentiment_sql), con=connection, params=sentiment_params)
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Alternative context load failed: %s", exc)
-        return pd.DataFrame(columns=["trade_date", "alt_urea_price", "alt_brent_price", "alt_news_sentiment_score"])
+        return pd.DataFrame(
+            columns=[
+                "trade_date",
+                "alt_urea_price",
+                "alt_urea_return_1d",
+                "alt_urea_return_5d",
+                "alt_urea_zscore_20d",
+                "alt_brent_price",
+                "alt_brent_return_1d",
+                "alt_brent_return_5d",
+                "alt_brent_zscore_20d",
+                "alt_news_sentiment_score",
+            ]
+        )
     finally:
         connection.close()
 
     if commodity_frame.empty and sentiment_frame.empty:
-        return pd.DataFrame(columns=["trade_date", "alt_urea_price", "alt_brent_price", "alt_news_sentiment_score"])
+        return pd.DataFrame(
+            columns=[
+                "trade_date",
+                "alt_urea_price",
+                "alt_urea_return_1d",
+                "alt_urea_return_5d",
+                "alt_urea_zscore_20d",
+                "alt_brent_price",
+                "alt_brent_return_1d",
+                "alt_brent_return_5d",
+                "alt_brent_zscore_20d",
+                "alt_news_sentiment_score",
+            ]
+        )
 
     for frame in (commodity_frame, sentiment_frame):
         if "trade_date" in frame.columns:
@@ -925,7 +994,42 @@ def load_alternative_context(
     merged["alt_brent_price"] = pd.to_numeric(merged.get("alt_brent_price"), errors="coerce")
     merged["alt_news_sentiment_score"] = pd.to_numeric(merged.get("alt_news_sentiment_score"), errors="coerce")
     merged = merged.dropna(subset=["trade_date"]).sort_values("trade_date").drop_duplicates("trade_date", keep="last")
-    return merged.reset_index(drop=True)
+
+    merged["alt_urea_price"] = merged["alt_urea_price"].ffill().bfill()
+    merged["alt_brent_price"] = merged["alt_brent_price"].ffill().bfill()
+    merged["alt_news_sentiment_score"] = merged["alt_news_sentiment_score"].ffill().bfill().fillna(0.0)
+
+    for commodity in ("urea", "brent"):
+        price_col = f"alt_{commodity}_price"
+        return_1d_col = f"alt_{commodity}_return_1d"
+        return_5d_col = f"alt_{commodity}_return_5d"
+        zscore_col = f"alt_{commodity}_zscore_20d"
+
+        merged[return_1d_col] = merged[price_col].pct_change(1)
+        merged[return_5d_col] = merged[price_col].pct_change(5)
+
+        rolling_mean = merged[price_col].rolling(window=20, min_periods=10).mean()
+        rolling_std = merged[price_col].rolling(window=20, min_periods=10).std()
+        merged[zscore_col] = (merged[price_col] - rolling_mean) / rolling_std.replace(0.0, np.nan)
+
+        merged[[return_1d_col, return_5d_col, zscore_col]] = merged[
+            [return_1d_col, return_5d_col, zscore_col]
+        ].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    return merged[
+        [
+            "trade_date",
+            "alt_urea_price",
+            "alt_urea_return_1d",
+            "alt_urea_return_5d",
+            "alt_urea_zscore_20d",
+            "alt_brent_price",
+            "alt_brent_return_1d",
+            "alt_brent_return_5d",
+            "alt_brent_zscore_20d",
+            "alt_news_sentiment_score",
+        ]
+    ].reset_index(drop=True)
 
 
 def compute_rsi(close_series: pd.Series, period: int = 14) -> pd.Series:
@@ -1053,13 +1157,32 @@ def build_feature_factory_dataset(
 
     if not alt_context.empty:
         merged = merged.merge(
-            alt_context[["trade_date", "alt_urea_price", "alt_brent_price", "alt_news_sentiment_score"]],
+            alt_context[
+                [
+                    "trade_date",
+                    "alt_urea_price",
+                    "alt_urea_return_1d",
+                    "alt_urea_return_5d",
+                    "alt_urea_zscore_20d",
+                    "alt_brent_price",
+                    "alt_brent_return_1d",
+                    "alt_brent_return_5d",
+                    "alt_brent_zscore_20d",
+                    "alt_news_sentiment_score",
+                ]
+            ],
             on="trade_date",
             how="left",
         )
     else:
         merged["alt_urea_price"] = np.nan
+        merged["alt_urea_return_1d"] = np.nan
+        merged["alt_urea_return_5d"] = np.nan
+        merged["alt_urea_zscore_20d"] = np.nan
         merged["alt_brent_price"] = np.nan
+        merged["alt_brent_return_1d"] = np.nan
+        merged["alt_brent_return_5d"] = np.nan
+        merged["alt_brent_zscore_20d"] = np.nan
         merged["alt_news_sentiment_score"] = np.nan
 
     merged[["usd_egp_close", "gold_usd_close", "cbe_policy_rate_pct", "usd_egp_return", "gold_return"]] = merged[
@@ -1067,21 +1190,37 @@ def build_feature_factory_dataset(
     ].ffill().bfill()
     merged["cbe_rate_changed"] = merged["cbe_rate_changed"].fillna(0).astype(int)
 
-    merged[["alt_urea_price", "alt_brent_price", "alt_news_sentiment_score"]] = merged[
-        ["alt_urea_price", "alt_brent_price", "alt_news_sentiment_score"]
-    ].ffill().bfill()
+    merged[
+        [
+            "alt_urea_price",
+            "alt_urea_return_1d",
+            "alt_urea_return_5d",
+            "alt_urea_zscore_20d",
+            "alt_brent_price",
+            "alt_brent_return_1d",
+            "alt_brent_return_5d",
+            "alt_brent_zscore_20d",
+            "alt_news_sentiment_score",
+        ]
+    ] = merged[
+        [
+            "alt_urea_price",
+            "alt_urea_return_1d",
+            "alt_urea_return_5d",
+            "alt_urea_zscore_20d",
+            "alt_brent_price",
+            "alt_brent_return_1d",
+            "alt_brent_return_5d",
+            "alt_brent_zscore_20d",
+            "alt_news_sentiment_score",
+        ]
+    ].ffill().bfill().fillna(0.0)
 
     symbol_roots = merged["symbol"].astype(str).str.upper().str.split(".").str[0]
-    merged["alt_urea_price"] = np.where(
-        symbol_roots.isin(UREA_SYMBOL_ROOTS),
-        merged["alt_urea_price"],
-        0.0,
-    )
-    merged["alt_brent_price"] = np.where(
-        symbol_roots.isin(BRENT_SYMBOL_ROOTS),
-        merged["alt_brent_price"],
-        0.0,
-    )
+    for column in ["alt_urea_price", "alt_urea_return_1d", "alt_urea_return_5d", "alt_urea_zscore_20d"]:
+        merged[column] = np.where(symbol_roots.isin(UREA_SYMBOL_ROOTS), merged[column], 0.0)
+    for column in ["alt_brent_price", "alt_brent_return_1d", "alt_brent_return_5d", "alt_brent_zscore_20d"]:
+        merged[column] = np.where(symbol_roots.isin(BRENT_SYMBOL_ROOTS), merged[column], 0.0)
     merged["alt_news_sentiment_score"] = merged["alt_news_sentiment_score"].fillna(0.0)
 
     merged = append_market_sentiment_features(merged)
@@ -1703,6 +1842,10 @@ def run_walk_forward_validation_xgboost(
         cumulative_profit_high_confidence_raw = 0.0
         cumulative_profit_high_confidence = 0.0
     high_confidence_buy_rate = float(high_confidence_signal_count / len(prediction_frame)) if len(prediction_frame) else 0.0
+    high_confidence_target_met = (
+        high_confidence_precision >= HIGH_CONFIDENCE_MIN_PRECISION_TARGET
+        and high_confidence_buy_rate >= HIGH_CONFIDENCE_TARGET_MIN_BUY_RATE
+    )
 
     metrics = WalkForwardMetrics(
         rmse=metrics.rmse,
@@ -1722,10 +1865,11 @@ def run_walk_forward_validation_xgboost(
     )
 
     LOGGER.info(
-        "HIGH_CONFIDENCE_AUDIT threshold=%.2f target_buy_rate=[%.4f, %.4f] precision=%.4f buy_rate=%.4f cumulative_profit_raw=%.4f cumulative_profit_stop_loss_5pct=%.4f",
+        "HIGH_CONFIDENCE_AUDIT threshold=%.2f target_precision=%.2f target_buy_rate_min=%.4f met=%s precision=%.4f buy_rate=%.4f cumulative_profit_raw=%.4f cumulative_profit_stop_loss_5pct=%.4f",
         high_confidence_threshold,
+        HIGH_CONFIDENCE_MIN_PRECISION_TARGET,
         HIGH_CONFIDENCE_TARGET_MIN_BUY_RATE,
-        HIGH_CONFIDENCE_TARGET_MAX_BUY_RATE,
+        high_confidence_target_met,
         high_confidence_precision,
         high_confidence_buy_rate,
         cumulative_profit_high_confidence_raw,
@@ -1902,9 +2046,14 @@ def main() -> None:
             "high_confidence_threshold": metrics.high_confidence_threshold,
             "high_confidence_target_buy_rate_min": HIGH_CONFIDENCE_TARGET_MIN_BUY_RATE,
             "high_confidence_target_buy_rate_max": HIGH_CONFIDENCE_TARGET_MAX_BUY_RATE,
+            "high_confidence_target_precision_min": HIGH_CONFIDENCE_MIN_PRECISION_TARGET,
             "high_confidence_stop_loss_pct": HIGH_CONFIDENCE_STOP_LOSS_PCT,
             "high_confidence_precision": metrics.high_confidence_precision,
             "high_confidence_buy_rate": metrics.high_confidence_buy_rate,
+            "high_confidence_target_met": (
+                metrics.high_confidence_precision >= HIGH_CONFIDENCE_MIN_PRECISION_TARGET
+                and metrics.high_confidence_buy_rate >= HIGH_CONFIDENCE_TARGET_MIN_BUY_RATE
+            ),
             "cumulative_profit_high_confidence_raw": metrics.cumulative_profit_high_confidence_raw,
             "cumulative_profit_high_confidence": metrics.cumulative_profit_high_confidence,
             "symbol_threshold_count": len(symbol_thresholds),
