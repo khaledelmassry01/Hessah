@@ -31,10 +31,13 @@ public class AiPredictionResponse {
     @JsonProperty("model_accuracy")
     private BigDecimal modelAccuracy;
 
+    @JsonProperty("allocations")
     private List<AiAllocationItem> allocations = new ArrayList<>();
 
+    @JsonProperty("recommendations")
     private List<AiRecommendationItem> recommendations = new ArrayList<>();
 
+    @JsonProperty("warnings")
     private List<String> warnings = new ArrayList<>();
 
     public String getRequestId() {

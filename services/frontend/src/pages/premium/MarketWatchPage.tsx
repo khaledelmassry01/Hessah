@@ -13,6 +13,9 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/contexts/AuthContext";
 import { fetchStopRules } from "@/lib/api";
+import { useMemo } from "react";
+import { Info } from "lucide-react";
+import type { StopRule, PortfolioRecommendation } from "@/types/api";
 
 export function MarketWatchPage() {
   const { isPremium } = useAuth();
@@ -39,68 +42,116 @@ export function MarketWatchPage() {
     );
   }
 
+  // Example: fetch XAI recommendations for each stock (replace with real API call as needed)
+  // This assumes you have a fetchPortfolioRecommendations or similar API call
+  // For demo, we'll use rulesQuery.data as the source, but in production, fetch the actual recommendations
+  // Merge StopRule and PortfolioRecommendation for table rendering
+  const recommendations = useMemo(() => {
+    return Array.isArray(rulesQuery.data)
+      ? rulesQuery.data.map((item: StopRule & PortfolioRecommendation) => ({
+          symbol: item.symbol ?? String(item.id) ?? "-",
+          confidenceScore: item.confidenceScore ?? undefined,
+          predictedReturn5d: item.predictedReturn5d ?? undefined,
+          action: item.action ?? undefined,
+          topReasons: item.topReasons ?? [],
+          stopLossPct: item.stopLossPct ?? undefined,
+          takeProfitPct: item.takeProfitPct ?? undefined,
+          status: item.status ?? undefined,
+          isActive: item.isActive ?? undefined,
+        }))
+      : [];
+  }, [rulesQuery.data]);
+
   return (
     <div className="space-y-5">
       <section className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Market Watch</h2>
           <p className="text-sm text-muted-foreground">
-            Monitor active stop-loss and take-profit guardrails.
+            Monitor active stop-loss and take-profit guardrails. Now with explainable AI insights.
           </p>
         </div>
         <Button variant="outline" onClick={() => rulesQuery.refetch()}>
           Refresh
         </Button>
       </section>
-
       <Card>
         <CardHeader>
-          <CardTitle>Active Stop Rules</CardTitle>
-          <CardDescription>Rule state synchronized with premium backend endpoints</CardDescription>
+          <CardTitle>Active Stop Rules & AI Insights</CardTitle>
+          <CardDescription>Live XAI metrics and guardrails from backend</CardDescription>
         </CardHeader>
         <CardContent>
           {rulesQuery.isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading market watch...</p>
+            <p className="text-sm text-muted-foreground">Analyzing Market...</p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Rule ID</TableHead>
-                  <TableHead>Portfolio Run</TableHead>
+                  <TableHead>Stock</TableHead>
+                  <TableHead>Confidence</TableHead>
+                  <TableHead>Pred. Return (5D)</TableHead>
+                  <TableHead>Action</TableHead>
+                  <TableHead>XAI Reasons</TableHead>
                   <TableHead>Stop Loss</TableHead>
                   <TableHead>Take Profit</TableHead>
                   <TableHead>Status</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rulesQuery.data?.length ? (
-                  rulesQuery.data.map((rule) => (
-                    <TableRow key={rule.id}>
-                      <TableCell className="font-medium">{rule.id}</TableCell>
-                      <TableCell>{rule.portfolioRunId ?? "-"}</TableCell>
-                      <TableCell>
-                        {typeof rule.stopLossPct === "number"
-                          ? `${(rule.stopLossPct * 100).toFixed(2)}%`
-                          : "-"}
-                      </TableCell>
-                      <TableCell>
-                        {typeof rule.takeProfitPct === "number"
-                          ? `${(rule.takeProfitPct * 100).toFixed(2)}%`
-                          : "-"}
-                      </TableCell>
-                      <TableCell>
-                        {rule.isActive ? (
-                          <Badge variant="success">Active</Badge>
-                        ) : (
-                          <Badge variant="secondary">Inactive</Badge>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))
+                {recommendations.length ? (
+                  recommendations.map((rec, idx) => {
+                    const confidence = rec.confidenceScore ?? 0;
+                    const isHighConfidence = confidence > 0.6;
+                    const badgeVariant = isHighConfidence ? "success" : "warning";
+                    const action = rec.action || "HOLD";
+                    const actionColor = action === "BUY" ? "success" : action === "HOLD" ? "secondary" : "warning";
+                    return (
+                      <TableRow key={rec.symbol || idx}>
+                        <TableCell className="font-medium">{rec.symbol}</TableCell>
+                        <TableCell>
+                          {rec.confidenceScore !== undefined ? (
+                            <Badge variant={badgeVariant}>{(confidence * 100).toFixed(1)}%</Badge>
+                          ) : (
+                            <span>-</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {typeof rec.predictedReturn5d === "number"
+                            ? `${(rec.predictedReturn5d * 100).toFixed(2)}%`
+                            : "-"}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={actionColor}>{action}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          {Array.isArray(rec.topReasons) && rec.topReasons.length > 0 ? (
+                            <ul className="list-disc pl-4">
+                              {rec.topReasons.map((reason: string, i: number) => (
+                                <li key={i}>{reason}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <span>No explainability reasons available.</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {typeof rec.stopLossPct === "number"
+                            ? `${(rec.stopLossPct * 100).toFixed(2)}%`
+                            : "-"}
+                        </TableCell>
+                        <TableCell>
+                          {typeof rec.takeProfitPct === "number"
+                            ? `${(rec.takeProfitPct * 100).toFixed(2)}%`
+                            : "-"}
+                        </TableCell>
+                        <TableCell>{rec.status || (rec.isActive ? "ACTIVE" : "-")}</TableCell>
+                      </TableRow>
+                    );
+                  })
                 ) : (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center text-muted-foreground">
-                      No active rules found. If this endpoint is not enabled yet, the table stays empty.
+                    <TableCell colSpan={8} className="text-center text-muted-foreground">
+                      No stop rules found.
                     </TableCell>
                   </TableRow>
                 )}

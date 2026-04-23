@@ -6,8 +6,11 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 public class AiAllocationItem {
 
+    @JsonProperty("symbol")
     private String symbol;
+    @JsonProperty("weight")
     private BigDecimal weight;
+    @JsonProperty("sector")
     private String sector;
     @JsonProperty("predicted_return_5d")
     private BigDecimal predictedReturn5d;

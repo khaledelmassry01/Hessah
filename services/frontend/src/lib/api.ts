@@ -388,6 +388,12 @@ function normalizePortfolioRecommendations(value: unknown): PortfolioRecommendat
       symbol: toStringValue(item.symbol),
       action: toStringValue(item.action),
       reason: toStringValue(item.reason),
+      topReasons: (Array.isArray(item.topReasons)
+        ? item.topReasons.map(toStringValue)
+        : Array.isArray(item.top_reasons)
+          ? item.top_reasons.map(toStringValue)
+          : []
+      ).filter((val): val is string => typeof val === "string"),
       predictedReturn5d:
         toNumber(item.predictedReturn5d) ??
         toNumber(item.predicted_return_5d),

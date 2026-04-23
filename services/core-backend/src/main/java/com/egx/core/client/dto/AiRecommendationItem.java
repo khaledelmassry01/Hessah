@@ -6,8 +6,11 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 public class AiRecommendationItem {
 
+    @JsonProperty("symbol")
     private String symbol;
+    @JsonProperty("action")
     private String action;
+    @JsonProperty("reason")
     private String reason;
 
     @JsonProperty("predicted_return_5d")
@@ -18,6 +21,13 @@ public class AiRecommendationItem {
 
     @JsonProperty("top_reasons")
     private java.util.List<String> topReasons;
+    public java.util.List<String> getTopReasons() {
+        return topReasons;
+    }
+
+    public void setTopReasons(java.util.List<String> topReasons) {
+        this.topReasons = topReasons;
+    }
 
     public String getSymbol() {
         return symbol;

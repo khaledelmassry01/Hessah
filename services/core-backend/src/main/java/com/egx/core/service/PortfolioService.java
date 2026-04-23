@@ -208,22 +208,26 @@ public class PortfolioService {
             securityAuditService.log("PORTFOLIO_GENERATION", userId, "SUCCESS", successDetails);
 
             List<StopRule> stopRules = new ArrayList<>();
-            for (AllocationExecution exec : allocationResult.executions()) {
-                if (exec.getExecutedShares() != null && exec.getExecutedShares() > 0) {
-                    StopRule rule = new StopRule();
-                    rule.setUserId(userId);
-                    rule.setStockId(exec.getStockId());
-                    rule.setPortfolioRunId(portfolioRun.getId());
-                    rule.setStopLossPct(new BigDecimal("0.050"));
-                    rule.setTakeProfitPct(new BigDecimal("0.100"));
-                    rule.setIsActive(true);
-                    rule.setCreatedAt(LocalDateTime.now());
-                    rule.setUpdatedAt(LocalDateTime.now());
-                    stopRules.add(rule);
+            if (allocationResult != null && allocationResult.executions() != null) {
+                for (AllocationExecution exec : allocationResult.executions()) {
+                    if (exec != null && exec.getExecutedShares() != null && exec.getExecutedShares() > 0) {
+                        StopRule rule = new StopRule();
+                        rule.setUserId(userId);
+                        rule.setStockId(exec.getStockId());
+                        rule.setPortfolioRunId(portfolioRun.getId());
+                        rule.setStopLossPct(new BigDecimal("0.050"));
+                        rule.setTakeProfitPct(new BigDecimal("0.100"));
+                        rule.setIsActive(true);
+                        rule.setCreatedAt(LocalDateTime.now());
+                        rule.setUpdatedAt(LocalDateTime.now());
+                        stopRules.add(rule);
+                    }
                 }
             }
+            
             if (!stopRules.isEmpty()) {
                 stopRuleRepository.saveAll(stopRules);
+                stopRuleRepository.flush(); // Ensure it hits the DB before transaction ends
             }
 
             return new PortfolioExecutionResult(

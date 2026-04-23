@@ -6,3 +6,5 @@ infra/infra
 services/api-gateway/target
 **/__pycache__/
 *.pyc
+services/core-backend/target
+services/api-gateway/target
