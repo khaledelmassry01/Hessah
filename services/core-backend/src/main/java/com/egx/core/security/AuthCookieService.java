@@ -15,7 +15,8 @@ import jakarta.servlet.http.HttpServletResponse;
 @Service
 public class AuthCookieService {
 
-    private static final String SAME_SITE_LAX = "Lax";
+    // P2 Fix: SameSite=Strict prevents CSRF attacks by only sending cookies on same-site requests
+    private static final String SAME_SITE_STRICT = "Strict";
 
     private final boolean secureCookies;
     private final String accessCookieName;
@@ -73,9 +74,9 @@ public class AuthCookieService {
 
     private ResponseCookie buildTokenCookie(String cookieName, String value, Duration maxAge) {
         return ResponseCookie.from(cookieName, value)
-                .httpOnly(true)
-                .secure(secureCookies)
-                .sameSite(SAME_SITE_LAX)
+                .httpOnly(true)          // P2 Fix: Prevent XSS via JavaScript access
+                .secure(secureCookies)   // P2 Fix: Only transmit over HTTPS in production
+                .sameSite(SAME_SITE_STRICT) // P2 Fix: Strict CSRF protection
                 .path("/")
                 .maxAge(maxAge)
                 .build();

@@ -30,6 +30,7 @@ import com.egx.core.security.SecurityRateLimitingFilter;
 public class SecurityConfig {
 
     private final boolean forceHttps;
+    private final String corsAllowedOrigins;
     private final JwtAuthFilter jwtAuthFilter;
     private final AuthRateLimitFilter authRateLimitFilter;
     private final SecurityRateLimitingFilter securityRateLimitingFilter;
@@ -37,12 +38,14 @@ public class SecurityConfig {
 
     public SecurityConfig(
             @Value("${app.security.force-https:false}") boolean forceHttps,
+            @Value("${app.security.cors.allowed-origins:http://localhost:5173}") String corsAllowedOrigins,
             JwtAuthFilter jwtAuthFilter,
             AuthRateLimitFilter authRateLimitFilter,
             SecurityRateLimitingFilter securityRateLimitingFilter,
             Environment environment
     ) {
         this.forceHttps = forceHttps;
+        this.corsAllowedOrigins = corsAllowedOrigins;
         this.jwtAuthFilter = jwtAuthFilter;
         this.authRateLimitFilter = authRateLimitFilter;
         this.securityRateLimitingFilter = securityRateLimitingFilter;
@@ -117,6 +120,9 @@ public class SecurityConfig {
                             "/api/core/ai/performance-summary"
                     ).hasRole("PREMIUM");
 
+                    // Admin-only API surface.
+                    auth.requestMatchers("/admin/**", "/api/core/admin/**").hasRole("ADMIN");
+
                     // Protect all gateway-routed core APIs.
                     auth.requestMatchers("/api/core/**").authenticated();
 
@@ -168,7 +174,11 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration cors = new CorsConfiguration();
-        cors.setAllowedOrigins(List.of("http://localhost:5173"));
+
+        // P2 Fix: Strict origin validation - never allow wildcard in production
+        List<String> origins = Arrays.asList(corsAllowedOrigins.split(","));
+        cors.setAllowedOrigins(origins);
+
         cors.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         cors.setAllowedHeaders(List.of(
                 "Authorization",

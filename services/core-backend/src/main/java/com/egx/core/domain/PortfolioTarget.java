@@ -1,13 +1,13 @@
 package com.egx.core.domain;
 
+import java.math.BigDecimal;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
-
-import java.math.BigDecimal;
 
 @Entity
 @Table(name = "portfolio_targets")
@@ -28,9 +28,6 @@ public class PortfolioTarget {
 
     @Column(name = "target_amount_egp", nullable = false, precision = 19, scale = 4)
     private BigDecimal targetAmountEgp;
-
-    @Column(name = "sector_code", nullable = false, length = 64)
-    private String sectorCode;
 
     @Column(name = "constraint_flags_json", columnDefinition = "json")
     private String constraintFlagsJson;
@@ -75,12 +72,13 @@ public class PortfolioTarget {
         this.targetAmountEgp = targetAmountEgp;
     }
 
+    /**
+     * Get sector code from associated stock instrument (5NF compliance).
+     * This is a derived field, not stored in the table.
+     */
     public String getSectorCode() {
-        return sectorCode;
-    }
-
-    public void setSectorCode(String sectorCode) {
-        this.sectorCode = sectorCode;
+        // This method can be populated via service layer using stock relationship
+        return null; // To be populated via StockInstrument lookup in service
     }
 
     public String getConstraintFlagsJson() {
@@ -90,5 +88,4 @@ public class PortfolioTarget {
     public void setConstraintFlagsJson(String constraintFlagsJson) {
         this.constraintFlagsJson = constraintFlagsJson;
     }
-
 }

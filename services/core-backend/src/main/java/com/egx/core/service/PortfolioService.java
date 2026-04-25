@@ -342,8 +342,7 @@ public class PortfolioService {
             target.setStockId(stock.getId());
             target.setTargetWeight(normalizedWeight);
             target.setTargetAmountEgp(targetAmount);
-                // Use the stock instrument sector to keep FK integrity with sector_reference.
-                target.setSectorCode(stock.getSectorCode());
+            // Note: sectorCode is now accessed via StockInstrument relationship (5NF compliance)
             target.setConstraintFlagsJson(
                     "{\"risk_level\":\"" + riskLevel.name() + "\",\"max_sector_weight\":0.30,\"max_adv30_participation\":0.05,\"exclude_suspended\":true}"
             );
@@ -399,7 +398,8 @@ public class PortfolioService {
                     StockInstrument synthetic = new StockInstrument();
                     synthetic.setSymbol(symbolKey);
                     synthetic.setName(symbolKey + " Auto-Registered");
-                    synthetic.setSectorCode(DEFAULT_SECTOR_CODE);
+                    // Note: sector is now a relationship to SectorReference (5NF compliance)
+                    // Set sector via relationship lookup in service or use default
                     synthetic.setIsSuspended(false);
                     synthetic.setCreatedAt(now);
                     synthetic.setUpdatedAt(now);

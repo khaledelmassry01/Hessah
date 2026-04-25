@@ -93,8 +93,7 @@ public class AllocationService {
             execution.setPriceSnapshot(priceSnapshot);
             execution.setTargetAmountEgp(targetAmount);
             execution.setExecutedShares(wholeShares);
-            execution.setExecutedAmountEgp(executedAmount);
-            execution.setResidualComponentEgp(residualComponent);
+            // Note: executedAmountEgp and residualComponentEgp are calculated on-demand (5NF compliance)
             execution.setSettlementDate(settlementDate);
             execution.setSettlementStatus(SettlementStatus.PENDING);
             execution.setCreatedAt(LocalDateTime.now());

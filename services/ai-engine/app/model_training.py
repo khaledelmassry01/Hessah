@@ -238,7 +238,9 @@ def train_xgboost_models(
     validation_start: date = DEFAULT_VALIDATION_START,
     validation_end: date = DEFAULT_VALIDATION_END,
     use_recency_weighting: bool = True,
+    n_estimators: int = 380,
 ) -> dict[str, Any]:
+    resolved_n_estimators = max(100, int(n_estimators))
     if horizon_days < 1:
         raise ValueError("horizon_days must be >= 1")
 
@@ -291,7 +293,7 @@ def train_xgboost_models(
 
         model = XGBRegressor(
             objective="reg:squarederror",
-            n_estimators=380,
+            n_estimators=resolved_n_estimators,
             learning_rate=0.045,
             max_depth=4,
             min_child_weight=2,
@@ -323,7 +325,7 @@ def train_xgboost_models(
 
         final_model = XGBRegressor(
             objective="reg:squarederror",
-            n_estimators=380,
+            n_estimators=resolved_n_estimators,
             learning_rate=0.045,
             max_depth=4,
             min_child_weight=2,
@@ -387,6 +389,7 @@ def train_xgboost_models(
         "featureColumns": FEATURE_COLUMNS,
         "meanAccuracy": mean_accuracy,
         "recencyWeightedTraining": bool(use_recency_weighting),
+        "nEstimators": resolved_n_estimators,
         "symbols": sorted(symbol_metrics.keys()),
         "symbolMetrics": symbol_metrics,
         "skippedSymbols": skipped_symbols,

@@ -36,11 +36,11 @@ DEFAULT_RETRAIN_TIER = "PREMIUM"
 TRADING_DAYS_PER_YEAR = 252.0
 FORECAST_HORIZON_DAYS = 5.0
 PREVENTIVE_SELL_THRESHOLD_5D = -0.10
-SMART_MAX_SECTOR_CAP = 0.30
-SMART_MIN_CONFIDENCE = 0.55
-RUNTIME_SMART_MONEY_LOW_VOLUME_DOWNSCALE = 0.85
-DYNAMIC_CONFIDENCE_MIN = 0.45
-DYNAMIC_CONFIDENCE_MAX = 0.80
+SMART_MAX_SECTOR_CAP = 0.40
+SMART_MIN_CONFIDENCE = 0.50
+RUNTIME_SMART_MONEY_LOW_VOLUME_DOWNSCALE = 0.95
+DYNAMIC_CONFIDENCE_MIN = 0.30
+DYNAMIC_CONFIDENCE_MAX = 0.75
 TOP_RECOMMENDATION_COUNT = 3
 ALT_NEWS_INFLUENCE_THRESHOLD = 0.08
 ALT_COMMODITY_INFLUENCE_THRESHOLD = 0.10
@@ -78,12 +78,16 @@ def train_models_now(
     attempts: int = 3,
     delay_seconds: float = 15.0,
     target_mode: str = "RETURN_PCT",
+    recency_weighted: bool = True,
+    n_estimators: int = 380,
 ) -> dict[str, object]:
     summary = _train_ml_models(
         reason="manual-endpoint",
         attempts=max(1, attempts),
         delay_seconds=max(1.0, float(delay_seconds)),
         target_mode=target_mode,
+        recency_weighted=recency_weighted,
+        n_estimators=max(100, int(n_estimators)),
     )
     return {
         "status": "SUCCESS",
@@ -192,10 +196,11 @@ def predict(payload: PredictRequest) -> PredictResponse:
     warnings: list[str] = []
 
     try:
-        enforced_sector_cap = min(float(payload.constraints.max_sector_weight), SMART_MAX_SECTOR_CAP)
-        if enforced_sector_cap < float(payload.constraints.max_sector_weight):
+        # FIXED: Use request's max_sector_weight directly without hardcoded ceiling
+        enforced_sector_cap = float(payload.constraints.max_sector_weight)
+        if enforced_sector_cap > 0.5:
             warnings.append(
-                f"Sector cap enforced at {SMART_MAX_SECTOR_CAP:.0%} for Smart Optimizer"
+                f"Sector cap set to {enforced_sector_cap:.0%} (high concentration risk)"
             )
 
         dataset = load_market_dataset(
@@ -676,16 +681,19 @@ def _compute_runtime_smart_money_multiplier(
     relative_volume = float(np.clip(relative_volume_60d, 0.30, 3.0))
     low_volume_multiplier = 1.0
     if relative_volume < 1.0:
+        # RELAXED: Cap penalty to max 5% (0.95 multiplier) instead of aggressive downscaling
         low_volume_multiplier = float(
-            np.clip(relative_volume, 0.60, 1.0) * RUNTIME_SMART_MONEY_LOW_VOLUME_DOWNSCALE
+            np.clip(1.0 - (1.0 - relative_volume) * 0.05, 0.95, 1.0)
         )
 
     if smart_money_signal < 0.0:
-        signal_multiplier = float(np.clip(1.0 + smart_money_signal, 0.70, 1.0))
+        # RELAXED: Cap negative signal penalty to max 5%
+        signal_multiplier = float(np.clip(1.0 + smart_money_signal * 0.5, 0.95, 1.0))
     else:
         signal_multiplier = 1.0
 
-    return float(np.clip(low_volume_multiplier * signal_multiplier, 0.50, 1.0))
+    # RELAXED: Minimum multiplier 0.95 (max 5% penalty) instead of 0.50
+    return float(np.clip(low_volume_multiplier * signal_multiplier, 0.95, 1.0))
 
 
 def _compute_risk_reward_ratio(
@@ -708,27 +716,28 @@ def _compute_dynamic_confidence_threshold(
 ) -> float:
     threshold = float(base_threshold)
 
+    # RELAXED: Reduced threshold adjustments to allow more symbols through
     if risk_reward_ratio < 0.0:
-        threshold += 0.14
+        threshold += 0.08  # Reduced from 0.14
     elif risk_reward_ratio < 0.5:
-        threshold += 0.08
+        threshold += 0.04  # Reduced from 0.08
     elif risk_reward_ratio > 1.3:
-        threshold -= 0.06
+        threshold -= 0.04  # Reduced adjustment
     elif risk_reward_ratio > 0.8:
-        threshold -= 0.03
+        threshold -= 0.02  # Reduced adjustment
 
-    if market_sentiment_score <= -0.20:
-        threshold += 0.05
-    elif market_sentiment_score >= 0.20:
-        threshold -= 0.03
+    if market_sentiment_score <= -0.25:  # Wider threshold (was -0.20)
+        threshold += 0.03  # Reduced from 0.05
+    elif market_sentiment_score >= 0.25:  # Wider threshold (was 0.20)
+        threshold -= 0.02  # Reduced adjustment
 
-    if smart_money_signal <= -0.05:
-        threshold += 0.05
-    elif smart_money_signal >= 0.08:
-        threshold -= 0.02
+    if smart_money_signal <= -0.10:  # Wider threshold (was -0.05)
+        threshold += 0.03  # Reduced from 0.05
+    elif smart_money_signal >= 0.10:  # Wider threshold (was 0.08)
+        threshold -= 0.01  # Reduced adjustment
 
-    if relative_volume_60d < 1.0:
-        threshold += 0.04
+    if relative_volume_60d < 0.8:  # Wider threshold (was < 1.0)
+        threshold += 0.02  # Reduced from 0.04
 
     return float(np.clip(threshold, DYNAMIC_CONFIDENCE_MIN, DYNAMIC_CONFIDENCE_MAX))
 
@@ -1031,6 +1040,8 @@ def _train_ml_models(
     attempts: int,
     delay_seconds: float,
     target_mode: str | None = None,
+    recency_weighted: bool = True,
+    n_estimators: int = 380,
 ) -> dict[str, object]:
     summary = train_models_with_retry(
         attempts=max(1, attempts),
@@ -1039,6 +1050,8 @@ def _train_ml_models(
         target_mode=target_mode or os.getenv("AI_TARGET_MODE", "RETURN_PCT"),
         horizon_days=int(_resolve_env_float("AI_FORECAST_HORIZON_DAYS", FORECAST_HORIZON_DAYS, minimum=1.0)),
         min_rows_per_symbol=int(_resolve_env_float("AI_MIN_ROWS_PER_SYMBOL", 120.0, minimum=20.0)),
+        use_recency_weighting=recency_weighted,
+        n_estimators=n_estimators,
     )
 
     summary = dict(summary)

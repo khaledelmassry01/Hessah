@@ -1,6 +1,11 @@
 package com.egx.core.domain;
 
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+
 import com.egx.core.domain.enums.SettlementStatus;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -9,10 +14,6 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
-
-import java.math.BigDecimal;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "allocation_executions")
@@ -36,12 +37,6 @@ public class AllocationExecution {
 
     @Column(name = "executed_shares", nullable = false)
     private Long executedShares;
-
-    @Column(name = "executed_amount_egp", nullable = false, precision = 19, scale = 4)
-    private BigDecimal executedAmountEgp;
-
-    @Column(name = "residual_component_egp", nullable = false, precision = 19, scale = 4)
-    private BigDecimal residualComponentEgp;
 
     @Column(name = "settlement_date")
     private LocalDate settlementDate;
@@ -101,20 +96,26 @@ public class AllocationExecution {
         this.executedShares = executedShares;
     }
 
+    /**
+     * Calculate executed amount on-demand (5NF compliance).
+     * Formula: executed_shares * price_snapshot
+     */
     public BigDecimal getExecutedAmountEgp() {
-        return executedAmountEgp;
+        if (executedShares == null || priceSnapshot == null) {
+            return BigDecimal.ZERO;
+        }
+        return priceSnapshot.multiply(BigDecimal.valueOf(executedShares));
     }
 
-    public void setExecutedAmountEgp(BigDecimal executedAmountEgp) {
-        this.executedAmountEgp = executedAmountEgp;
-    }
-
+    /**
+     * Calculate residual component on-demand (5NF compliance).
+     * Formula: target_amount_egp - executed_amount_egp
+     */
     public BigDecimal getResidualComponentEgp() {
-        return residualComponentEgp;
-    }
-
-    public void setResidualComponentEgp(BigDecimal residualComponentEgp) {
-        this.residualComponentEgp = residualComponentEgp;
+        if (targetAmountEgp == null) {
+            return BigDecimal.ZERO;
+        }
+        return targetAmountEgp.subtract(getExecutedAmountEgp());
     }
 
     public LocalDate getSettlementDate() {

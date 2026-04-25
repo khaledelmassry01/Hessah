@@ -216,6 +216,10 @@ public class InstrumentSyncService {
         String name = normalizeName(command.name(), symbol);
         String sectorCode = resolveSectorCode(command.sector());
 
+        // 5NF Compliance: Look up SectorReference by code
+        SectorReference sector = sectorReferenceRepository.findByCodeIgnoreCase(sectorCode)
+                .orElseThrow(() -> new IllegalStateException("Sector not found: " + sectorCode));
+
         StockInstrument existing = findExistingBySymbolAliases(symbol);
         LocalDateTime now = LocalDateTime.now();
 
@@ -223,7 +227,7 @@ public class InstrumentSyncService {
             StockInstrument created = new StockInstrument();
             created.setSymbol(symbol);
             created.setName(name);
-            created.setSectorCode(sectorCode);
+            created.setSector(sector); // 5NF: Set relationship instead of code
             created.setIsSuspended(false);
             created.setSuspensionReason(null);
             created.setLastPrice(null);
@@ -238,7 +242,7 @@ public class InstrumentSyncService {
         }
 
         existing.setName(name);
-        existing.setSectorCode(sectorCode);
+        existing.setSector(sector); // 5NF: Set relationship instead of code
         existing.setIsSuspended(false);
         existing.setSuspensionReason(null);
         existing.setUpdatedAt(now);
@@ -295,7 +299,6 @@ public class InstrumentSyncService {
             SectorReference created = new SectorReference();
             created.setCode(code);
             created.setName(truncate(name, SECTOR_NAME_MAX_LENGTH));
-            created.setIsActive(true);
             created.setCreatedAt(now);
             created.setUpdatedAt(now);
             sectorReferenceRepository.saveAndFlush(created);
@@ -303,10 +306,6 @@ public class InstrumentSyncService {
         }
 
         boolean changed = false;
-        if (!Boolean.TRUE.equals(existing.getIsActive())) {
-            existing.setIsActive(true);
-            changed = true;
-        }
 
         String normalizedName = truncate(name, SECTOR_NAME_MAX_LENGTH);
         if (normalizedName != null && !normalizedName.isBlank() && !normalizedName.equals(existing.getName())) {

@@ -15,7 +15,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { fetchStopRules } from "@/lib/api";
 import { useMemo } from "react";
 import { Info } from "lucide-react";
-import type { StopRule, PortfolioRecommendation } from "@/types/api";
+import type { StopRule } from "@/types/api";
 
 export function MarketWatchPage() {
   const { isPremium } = useAuth();
@@ -42,18 +42,19 @@ export function MarketWatchPage() {
     );
   }
 
-  // Example: fetch XAI recommendations for each stock (replace with real API call as needed)
-  // This assumes you have a fetchPortfolioRecommendations or similar API call
-  // For demo, we'll use rulesQuery.data as the source, but in production, fetch the actual recommendations
-  // Merge StopRule and PortfolioRecommendation for table rendering
+  // Market Watch: Display enriched Stop Rules with AI Market Radar signals
+  // The backend now returns enriched StopRule objects with symbol, confidenceScore,
+  // predictedReturn5d, action, and xaiReasons from the Daily AI Radar scan.
   const recommendations = useMemo(() => {
     return Array.isArray(rulesQuery.data)
-      ? rulesQuery.data.map((item: StopRule & PortfolioRecommendation) => ({
-          symbol: item.symbol ?? String(item.id) ?? "-",
+      ? rulesQuery.data.map((item: StopRule) => ({
+          id: item.id,
+          stockId: item.stockId,
+          symbol: item.symbol ?? String(item.stockId) ?? "-",
           confidenceScore: item.confidenceScore ?? undefined,
           predictedReturn5d: item.predictedReturn5d ?? undefined,
           action: item.action ?? undefined,
-          topReasons: item.topReasons ?? [],
+          xaiReasons: item.xaiReasons ?? [],
           stopLossPct: item.stopLossPct ?? undefined,
           takeProfitPct: item.takeProfitPct ?? undefined,
           status: item.status ?? undefined,
@@ -107,10 +108,10 @@ export function MarketWatchPage() {
                     const actionColor = action === "BUY" ? "success" : action === "HOLD" ? "secondary" : "warning";
                     return (
                       <TableRow key={rec.symbol || idx}>
-                        <TableCell className="font-medium">{rec.symbol}</TableCell>
+                        <TableCell className="font-medium">{rec.symbol || String(rec.stockId) || "-"}</TableCell>
                         <TableCell>
                           {rec.confidenceScore !== undefined ? (
-                            <Badge variant={badgeVariant}>{(confidence * 100).toFixed(1)}%</Badge>
+                            <Badge variant={badgeVariant}>{(confidence * 100).toFixed(2)}%</Badge>
                           ) : (
                             <span>-</span>
                           )}
@@ -124,15 +125,7 @@ export function MarketWatchPage() {
                           <Badge variant={actionColor}>{action}</Badge>
                         </TableCell>
                         <TableCell>
-                          {Array.isArray(rec.topReasons) && rec.topReasons.length > 0 ? (
-                            <ul className="list-disc pl-4">
-                              {rec.topReasons.map((reason: string, i: number) => (
-                                <li key={i}>{reason}</li>
-                              ))}
-                            </ul>
-                          ) : (
-                            <span>No explainability reasons available.</span>
-                          )}
+                          {rec.xaiReasons?.[0] || "No explainability reasons available."}
                         </TableCell>
                         <TableCell>
                           {typeof rec.stopLossPct === "number"

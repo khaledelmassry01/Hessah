@@ -1,8 +1,16 @@
-import { useMemo } from "react";
+import { useMemo, Suspense } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { PortfolioPieChart } from "@/components/charts/PortfolioPieChart";
 import { StatCard } from "@/components/dashboard/StatCard";
+import { WidgetErrorBoundary } from "@/components/ErrorBoundary";
+import {
+  StatCardSkeleton,
+  PortfolioChartSkeleton,
+  AllocationSnapshotSkeleton,
+  InstrumentsTableSkeleton,
+  AiRecommendationsSkeleton,
+} from "@/components/dashboard/DashboardSkeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -101,36 +109,9 @@ export function DashboardPage() {
     [instrumentsQuery.data],
   );
 
-  const isLoading = walletQuery.isLoading || portfolioQuery.isLoading || instrumentsQuery.isLoading;
-
-  const hasError = walletQuery.error || portfolioQuery.error || instrumentsQuery.error;
-
-  const errorMessage =
-    walletQuery.error
-      ? mapApiError(walletQuery.error)
-      : portfolioQuery.error
-        ? mapApiError(portfolioQuery.error)
-        : instrumentsQuery.error
-          ? mapApiError(instrumentsQuery.error)
-          : null;
-
-  if (isLoading) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-9 w-48" />
-        <div className="grid gap-4 md:grid-cols-3">
-          <Skeleton className="h-32" />
-          <Skeleton className="h-32" />
-          <Skeleton className="h-32" />
-        </div>
-        <div className="grid gap-4 xl:grid-cols-[1fr_1.3fr]">
-          <Skeleton className="h-72" />
-          <Skeleton className="h-72" />
-        </div>
-        <Skeleton className="h-[360px]" />
-      </div>
-    );
-  }
+  // P2/P3 Fix: Removed blocking isLoading check - widgets now load independently
+  // Each widget handles its own loading state with skeletons
+  // Errors are handled per-widget via ErrorBoundary, not page-wide
 
   return (
     <div className="space-y-6 text-slate-100">
@@ -152,44 +133,70 @@ export function DashboardPage() {
         </div>
       </section>
 
-      {hasError ? (
-        <Card className="border-destructive/40 bg-destructive/10">
-          <CardContent className="pt-6 text-sm text-destructive">
-            {errorMessage || "Some widgets failed to load. Check API availability or token validity."}
-          </CardContent>
-        </Card>
-      ) : null}
 
+      {/* Stat Cards with independent loading and error boundaries */}
       <section className="grid gap-4 md:grid-cols-3">
-        <StatCard
-          title="Balance"
-          value={formatCurrencyEGP(walletBalance)}
-          subtitle={`Available ${formatCurrencyEGP(walletQuery.data?.availableBalance)}`}
-          className="border-slate-700/70 bg-slate-950/80 text-slate-100"
-        />
-        <StatCard
-          title="Total Investment"
-          value={formatCurrencyEGP(totalInvested)}
-          subtitle="Current allocated capital"
-          className="border-slate-700/70 bg-slate-950/80 text-slate-100"
-        />
-        <StatCard
-          title="Model Accuracy"
-          value={formatPercent(displayedModelAccuracy)}
-          subtitle="Current AI model accuracy score"
-          trend={typeof displayedModelAccuracy === "number" && displayedModelAccuracy >= 0.7 ? "up" : undefined}
-          className="border-slate-700/70 bg-slate-950/80 text-slate-100"
-        />
+        <WidgetErrorBoundary title="Balance Card">
+          {walletQuery.isLoading ? (
+            <StatCardSkeleton />
+          ) : (
+            <StatCard
+              title="Balance"
+              value={formatCurrencyEGP(walletBalance)}
+              subtitle={`Available ${formatCurrencyEGP(walletQuery.data?.availableBalance)}`}
+              className="border-slate-700/70 bg-slate-950/80 text-slate-100"
+            />
+          )}
+        </WidgetErrorBoundary>
+
+        <WidgetErrorBoundary title="Investment Card">
+          {portfolioQuery.isLoading ? (
+            <StatCardSkeleton />
+          ) : (
+            <StatCard
+              title="Total Investment"
+              value={formatCurrencyEGP(totalInvested)}
+              subtitle="Current allocated capital"
+              className="border-slate-700/70 bg-slate-950/80 text-slate-100"
+            />
+          )}
+        </WidgetErrorBoundary>
+
+        <WidgetErrorBoundary title="Model Accuracy Card">
+          {performanceQuery.isLoading && portfolioQuery.isLoading ? (
+            <StatCardSkeleton />
+          ) : (
+            <StatCard
+              title="Model Accuracy"
+              value={formatPercent(displayedModelAccuracy)}
+              subtitle="Current AI model accuracy score"
+              trend={typeof displayedModelAccuracy === "number" && displayedModelAccuracy >= 0.7 ? "up" : undefined}
+              className="border-slate-700/70 bg-slate-950/80 text-slate-100"
+            />
+          )}
+        </WidgetErrorBoundary>
       </section>
 
+      {/* Charts and Allocation with independent loading */}
       <section className="grid gap-4 xl:grid-cols-[1fr_1.3fr]">
-        <PortfolioPieChart allocations={allocations} />
-        <Card className="border-slate-700/70 bg-slate-950/80 text-slate-100">
-          <CardHeader>
-            <CardTitle>Allocation Snapshot</CardTitle>
-            <CardDescription className="text-slate-400">Latest optimizer run financial metrics</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm">
+        <WidgetErrorBoundary title="Portfolio Chart">
+          {portfolioQuery.isLoading ? (
+            <PortfolioChartSkeleton />
+          ) : (
+            <PortfolioPieChart allocations={allocations} />
+          )}
+        </WidgetErrorBoundary>
+
+        <WidgetErrorBoundary title="Allocation Snapshot">
+          {portfolioQuery.isLoading ? (
+            <AllocationSnapshotSkeleton />
+          ) : (
+            <Card className="border-slate-700/70 bg-slate-950/80 text-slate-100">
+              <CardHeader>
+                <CardTitle>Allocation Snapshot</CardTitle>
+                <CardDescription className="text-slate-400">Latest optimizer run financial metrics</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
             <div className="flex items-center justify-between text-slate-300">
               <span className="text-slate-400">Portfolio Run ID</span>
               <span className="font-medium">{portfolioQuery.data?.portfolioRunId ?? "-"}</span>
@@ -223,20 +230,26 @@ export function DashboardPage() {
               <span className="font-medium">{formatPercent(portfolioQuery.data?.confidenceScore)}</span>
             </div>
           </CardContent>
-        </Card>
+            </Card>
+          )}
+        </WidgetErrorBoundary>
       </section>
 
-      {aiRecommendations.length > 0 ? (
-        <section>
-          <Card className="border-slate-700/70 bg-slate-950/80 text-slate-100">
-            <CardHeader>
-              <CardTitle>AI Recommendations & Logic</CardTitle>
-              <CardDescription className="text-slate-400">
-                Detailed reasoning for allocations and portfolio predictions.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {aiRecommendations.map((item, index) => {
+      {/* AI Recommendations with ErrorBoundary */}
+      <WidgetErrorBoundary title="AI Recommendations">
+        {portfolioQuery.isLoading ? (
+          <AiRecommendationsSkeleton />
+        ) : aiRecommendations.length > 0 ? (
+          <section>
+            <Card className="border-slate-700/70 bg-slate-950/80 text-slate-100">
+              <CardHeader>
+                <CardTitle>AI Recommendations & Logic</CardTitle>
+                <CardDescription className="text-slate-400">
+                  Detailed reasoning for allocations and portfolio predictions.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {aiRecommendations.map((item, index) => {
                 const confidence = item.confidenceScore ?? 0;
                 const isHighConfidence = confidence > 0.65;
                 const badgeVariant = isHighConfidence ? "success" : "warning";
@@ -276,28 +289,34 @@ export function DashboardPage() {
             </CardContent>
           </Card>
         </section>
-      ) : null}
+        ) : null}
+      </WidgetErrorBoundary>
 
-      <section>
-        <Card className="border-slate-700/70 bg-slate-950/80 text-slate-100">
-          <CardHeader>
-            <CardTitle>Instruments Table</CardTitle>
-            <CardDescription className="text-slate-400">Live instruments feed from /api/core/instruments</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Symbol</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Sector</TableHead>
-                  <TableHead>Last Price</TableHead>
-                  <TableHead>Day Change</TableHead>
-                  <TableHead>Volume</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {instruments.length === 0 ? (
+      {/* Instruments Table with ErrorBoundary */}
+      <WidgetErrorBoundary title="Instruments Table">
+        {instrumentsQuery.isLoading ? (
+          <InstrumentsTableSkeleton />
+        ) : (
+          <section>
+            <Card className="border-slate-700/70 bg-slate-950/80 text-slate-100">
+              <CardHeader>
+                <CardTitle>Instruments Table</CardTitle>
+                <CardDescription className="text-slate-400">Live instruments feed from /api/core/instruments</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Symbol</TableHead>
+                      <TableHead>Name</TableHead>
+                      <TableHead>Sector</TableHead>
+                      <TableHead>Last Price</TableHead>
+                      <TableHead>Day Change</TableHead>
+                      <TableHead>Volume</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {instruments.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="text-center text-muted-foreground">
                       No instrument data is available.
@@ -332,8 +351,10 @@ export function DashboardPage() {
               </TableBody>
             </Table>
           </CardContent>
-        </Card>
-      </section>
+            </Card>
+          </section>
+        )}
+      </WidgetErrorBoundary>
     </div>
   );
 }

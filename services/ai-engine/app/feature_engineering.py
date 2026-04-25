@@ -24,30 +24,41 @@ DEFAULT_LOOKBACK_START = date(2016, 1, 1)
 UREA_SYMBOL_ROOTS = {"ABUK", "MFPC"}
 BRENT_SYMBOL_ROOTS = {"AMOC", "SKPC"}
 
+# Unified FEATURE_COLUMNS - 32 features matching feature_factory.py
+# Training-Serving Skew Fix: All features must be present in both training and serving
 FEATURE_COLUMNS = [
-    "close_price",
     "daily_return",
     "ema_20",
     "ema_50",
+    "ema_200",
+    "rsi_14",
     "macd",
     "macd_signal",
     "macd_hist",
-    "rsi_14",
-    "volume",
-    "relative_volume_60d",
+    "bollinger_mid_20",
+    "bollinger_upper_20",
+    "bollinger_lower_20",
+    "atr_14",
     "usd_egp_return",
     "gold_return",
+    "stock_usd_corr_20d",
+    "sector_momentum_5d",
+    "volume_shock_20d",
+    "relative_volume_60d",
     "market_sentiment_score",
     "global_factor_corr_sp500",
     "smart_money_signal",
-    "usd_egp_return_lag1",
-    "usd_egp_return_lag5",
-    "gold_return_lag1",
-    "gold_return_lag5",
-    "relative_strength_vs_egx30",
-    "alt_urea_price",
-    "alt_brent_price",
+    "cbe_policy_rate_pct",
+    "cbe_rate_changed",
     "alt_news_sentiment_score",
+    "alt_urea_price",
+    "alt_urea_return_1d",
+    "alt_urea_return_5d",
+    "alt_urea_zscore_20d",
+    "alt_brent_price",
+    "alt_brent_return_1d",
+    "alt_brent_return_5d",
+    "alt_brent_zscore_20d",
 ]
 
 
@@ -155,7 +166,9 @@ def load_market_context_data(
         "SELECT",
         "  trade_date,",
         "  usd_egp_close,",
-        "  gold_usd_close",
+        "  gold_usd_close,",
+        "  cbe_policy_rate_pct,",
+        "  cbe_rate_changed",
         "FROM market_context",
         "WHERE trade_date >= %s",
     ]
@@ -238,8 +251,46 @@ def load_market_context_data(
     frame = frame.dropna(subset=["trade_date"]).sort_values("trade_date").drop_duplicates("trade_date", keep="last")
     frame["usd_egp_return"] = frame["usd_egp_close"].pct_change()
     frame["gold_return"] = frame["gold_usd_close"].pct_change()
+    frame["cbe_policy_rate_pct"] = pd.to_numeric(frame.get("cbe_policy_rate_pct"), errors="coerce").ffill().bfill()
+    frame["cbe_rate_changed"] = pd.to_numeric(frame.get("cbe_rate_changed"), errors="coerce").fillna(0).astype(int)
 
-    return frame[["trade_date", "usd_egp_return", "gold_return", "alt_urea_price", "alt_brent_price", "alt_news_sentiment_score"]].reset_index(drop=True)
+    return frame[[
+        "trade_date", "usd_egp_return", "gold_return",
+        "cbe_policy_rate_pct", "cbe_rate_changed",
+        "alt_urea_price", "alt_brent_price", "alt_news_sentiment_score"
+    ]].reset_index(drop=True)
+
+
+def _load_sector_mapping(settings: MysqlSettings | None = None) -> dict[str, str]:
+    """Load sector mapping from stock_instruments table.
+
+    Training-Serving Skew Fix: Required for sector_momentum_5d calculation.
+    """
+    sql = """
+    SELECT UPPER(symbol) AS symbol, COALESCE(sector_code, 'UNMAPPED') AS sector_code
+    FROM stock_instruments
+    """
+    connection = open_mysql_connection(settings=settings)
+    try:
+        frame = pd.read_sql(sql=sql, con=connection)
+    finally:
+        connection.close()
+
+    if frame.empty:
+        return {}
+
+    mapping: dict[str, str] = {}
+    for _, item in frame.iterrows():
+        raw_symbol = str(item.get("symbol") or "").strip().upper()
+        if not raw_symbol:
+            continue
+        # Map both full symbol and root
+        mapping[raw_symbol] = str(item.get("sector_code") or "UNMAPPED").strip().upper()
+        root = raw_symbol.split(".")[0]
+        if root:
+            mapping[root] = str(item.get("sector_code") or "UNMAPPED").strip().upper()
+
+    return mapping
 
 
 def add_contextual_features(raw_frame: pd.DataFrame, settings: MysqlSettings | None = None) -> pd.DataFrame:
@@ -252,61 +303,80 @@ def add_contextual_features(raw_frame: pd.DataFrame, settings: MysqlSettings | N
 
     context = load_market_context_data(start_date=start_value, end_date=end_value, settings=settings)
     merged = local.merge(context, on="trade_date", how="left")
-    merged[["usd_egp_return", "gold_return"]] = merged[["usd_egp_return", "gold_return"]].ffill().bfill()
+    merged[["usd_egp_return", "gold_return", "cbe_policy_rate_pct"]] = merged[
+        ["usd_egp_return", "gold_return", "cbe_policy_rate_pct"]
+    ].ffill().bfill()
     merged["usd_egp_return"] = merged["usd_egp_return"].fillna(0.0)
     merged["gold_return"] = merged["gold_return"].fillna(0.0)
+    merged["cbe_policy_rate_pct"] = merged["cbe_policy_rate_pct"].fillna(0.0)
+    merged["cbe_rate_changed"] = merged["cbe_rate_changed"].fillna(0).astype(int)
 
-    merged["usd_egp_return_lag1"] = merged.groupby("symbol")["usd_egp_return"].shift(1)
-    merged["usd_egp_return_lag5"] = merged.groupby("symbol")["usd_egp_return"].shift(5)
-    merged["gold_return_lag1"] = merged.groupby("symbol")["gold_return"].shift(1)
-    merged["gold_return_lag5"] = merged.groupby("symbol")["gold_return"].shift(5)
-    merged[[
-        "usd_egp_return_lag1",
-        "usd_egp_return_lag5",
-        "gold_return_lag1",
-        "gold_return_lag5",
-    ]] = merged[[
-        "usd_egp_return_lag1",
-        "usd_egp_return_lag5",
-        "gold_return_lag1",
-        "gold_return_lag5",
-    ]].ffill().bfill().fillna(0.0)
-
-    egx30_return = (
-        merged.groupby("trade_date", as_index=False)["daily_return"]
-        .mean()
-        .rename(columns={"daily_return": "egx30_index_return"})
+    # Training-Serving Skew Fix: Add stock_usd_corr_20d (rolling correlation)
+    merged["stock_usd_corr_20d"] = (
+        merged.groupby("symbol", group_keys=False)
+        .apply(
+            lambda group: group["daily_return"].rolling(window=20, min_periods=10).corr(group["usd_egp_return"])
+        )
+        .reset_index(level=0, drop=True)
     )
-    merged = merged.merge(egx30_return, on="trade_date", how="left")
-    safe_denominator = merged["egx30_index_return"].replace(0.0, np.nan)
-    merged["relative_strength_vs_egx30"] = merged["daily_return"] / safe_denominator
-    merged["relative_strength_vs_egx30"] = merged["relative_strength_vs_egx30"].replace([np.inf, -np.inf], np.nan)
-    merged["relative_strength_vs_egx30"] = merged["relative_strength_vs_egx30"].fillna(0.0)
+    merged["stock_usd_corr_20d"] = merged["stock_usd_corr_20d"].fillna(0.0)
 
-    # Process alternative data for specific sectors and support both ROOT and ROOT.CA forms.
+    # Training-Serving Skew Fix: Add sector_momentum_5d
+    # Load sector mapping from stock_instruments
+    sector_map = _load_sector_mapping(settings)
+    merged["sector_code"] = merged["symbol"].map(
+        lambda s: sector_map.get(str(s).upper().split(".")[0], "UNMAPPED")
+    )
+
+    sector_daily = (
+        merged.groupby(["trade_date", "sector_code"], as_index=False)["daily_return"]
+        .mean()
+        .rename(columns={"daily_return": "sector_daily_return"})
+        .sort_values(["sector_code", "trade_date"])
+    )
+    sector_daily["sector_momentum_5d"] = (
+        sector_daily.groupby("sector_code")["sector_daily_return"]
+        .transform(lambda series: series.rolling(window=5, min_periods=3).mean())
+    )
+    merged = merged.merge(
+        sector_daily[["trade_date", "sector_code", "sector_momentum_5d"]],
+        on=["trade_date", "sector_code"],
+        how="left",
+    )
+    merged["sector_momentum_5d"] = merged["sector_momentum_5d"].fillna(0.0)
+
+    # Process alternative data for specific sectors and compute returns/zscores
     symbol_roots = merged["symbol"].astype(str).str.upper().str.split(".").str[0]
-    if "alt_urea_price" in merged.columns:
-        merged["alt_urea_price"] = np.where(
-            symbol_roots.isin(UREA_SYMBOL_ROOTS),
-            merged["alt_urea_price"],
-            0.0,
-        )
-        merged["alt_urea_price"] = merged["alt_urea_price"].fillna(0.0)
 
-    if "alt_brent_price" in merged.columns:
-        merged["alt_brent_price"] = np.where(
-            symbol_roots.isin(BRENT_SYMBOL_ROOTS),
-            merged["alt_brent_price"],
-            0.0,
-        )
-        merged["alt_brent_price"] = merged["alt_brent_price"].fillna(0.0)
-        
+    # Training-Serving Skew Fix: Compute urea/brent returns and zscores
+    for commodity in ("urea", "brent"):
+        price_col = f"alt_{commodity}_price"
+        return_1d_col = f"alt_{commodity}_return_1d"
+        return_5d_col = f"alt_{commodity}_return_5d"
+        zscore_col = f"alt_{commodity}_zscore_20d"
+        symbol_roots_set = UREA_SYMBOL_ROOTS if commodity == "urea" else BRENT_SYMBOL_ROOTS
+
+        if price_col in merged.columns:
+            # Compute returns
+            merged[return_1d_col] = merged[price_col].pct_change(1)
+            merged[return_5d_col] = merged[price_col].pct_change(5)
+
+            # Compute zscore
+            rolling_mean = merged[price_col].rolling(window=20, min_periods=10).mean()
+            rolling_std = merged[price_col].rolling(window=20, min_periods=10).std()
+            merged[zscore_col] = (merged[price_col] - rolling_mean) / rolling_std.replace(0.0, np.nan)
+
+            # Zero out for non-relevant symbols
+            for col in [price_col, return_1d_col, return_5d_col, zscore_col]:
+                merged[col] = np.where(symbol_roots.isin(symbol_roots_set), merged[col], 0.0)
+                merged[col] = merged[col].fillna(0.0)
+
     if "alt_news_sentiment_score" in merged.columns:
         merged["alt_news_sentiment_score"] = merged["alt_news_sentiment_score"].fillna(0.0)
 
     merged = append_market_sentiment_features(merged)
 
-    return merged.drop(columns=["egx30_index_return"])
+    return merged.drop(columns=["sector_code"], errors="ignore")
 
 
 def compute_rsi(close_series: pd.Series, period: int = 14) -> pd.Series:
@@ -322,6 +392,28 @@ def compute_rsi(close_series: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 
+def compute_atr(group: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Compute Average True Range (ATR) for volatility measurement.
+
+    Ported from feature_factory.py to eliminate training-serving skew.
+    """
+    high = group["high_price"].astype(float)
+    low = group["low_price"].astype(float)
+    close = group["close_price"].astype(float)
+
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    return true_range.rolling(window=period, min_periods=period).mean()
+
+
 def add_technical_indicators(raw_frame: pd.DataFrame) -> pd.DataFrame:
     if raw_frame.empty:
         return raw_frame.copy()
@@ -335,6 +427,7 @@ def add_technical_indicators(raw_frame: pd.DataFrame) -> pd.DataFrame:
         local["daily_return"] = close.pct_change()
         local["ema_20"] = close.ewm(span=20, adjust=False).mean()
         local["ema_50"] = close.ewm(span=50, adjust=False).mean()
+        local["ema_200"] = close.ewm(span=200, adjust=False).mean()  # Added for training-serving skew fix
 
         ema_12 = close.ewm(span=12, adjust=False).mean()
         ema_26 = close.ewm(span=26, adjust=False).mean()
@@ -342,7 +435,14 @@ def add_technical_indicators(raw_frame: pd.DataFrame) -> pd.DataFrame:
         local["macd_signal"] = local["macd"].ewm(span=9, adjust=False).mean()
         local["macd_hist"] = local["macd"] - local["macd_signal"]
 
+        # Bollinger Bands - Added for training-serving skew fix
+        rolling_std_20 = close.rolling(window=20, min_periods=20).std()
+        local["bollinger_mid_20"] = close.rolling(window=20, min_periods=20).mean()
+        local["bollinger_upper_20"] = local["bollinger_mid_20"] + (2.0 * rolling_std_20)
+        local["bollinger_lower_20"] = local["bollinger_mid_20"] - (2.0 * rolling_std_20)
+
         local["rsi_14"] = compute_rsi(close, period=14)
+        local["atr_14"] = compute_atr(local, period=14)  # Added for training-serving skew fix
 
         volume_float = local["volume"].astype(float)
         local["volume_60d_avg"] = volume_float.rolling(window=60, min_periods=20).mean()

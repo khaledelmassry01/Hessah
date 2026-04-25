@@ -175,15 +175,24 @@ export interface AiPerformanceSummaryEntry {
   };
 }
 
+/**
+ * Enriched Stop Rule with AI Market Radar signals for Market Watch dashboard.
+ */
 export interface StopRule {
   id: number;
   userId?: number;
   stockId?: number;
+  symbol?: string;              // Stock symbol (e.g., "COMI.CA")
   portfolioRunId?: number;
   stopLossPct?: number;
   takeProfitPct?: number;
   isActive?: boolean;
   status?: string;
+  // AI Market Radar fields (enriched by backend)
+  confidenceScore?: number;      // AI confidence (0.0 - 1.0)
+  predictedReturn5d?: number;    // 5-day predicted return
+  action?: string;               // BUY, HOLD, SELL, PREVENTIVE_SELL, UNKNOWN
+  xaiReasons?: string[];          // Explainable AI reasons
 }
 
 export interface ApiError {

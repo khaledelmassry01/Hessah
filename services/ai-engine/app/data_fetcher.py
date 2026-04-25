@@ -1,0 +1,893 @@
+"""
+Multi-Source Data Fetcher Module
+Integrates Investing.com, Alpha Vantage, and Financial Modeling Prep (FMP)
+with fallback chain logic for resilient data retrieval.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Any, Callable
+
+import pandas as pd
+import requests
+
+LOGGER = logging.getLogger(__name__)
+
+# API Keys
+ALPHA_VANTAGE_API_KEY = "HEDCR99YILNP6A4A"
+FMP_API_KEY = "8ID9U3FQCVXMxIJms5jmQxRtQMUBl4aV"
+
+# API Endpoints
+ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
+FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+
+# Source priority for fallback chain
+FALLBACK_CHAIN = {
+    "egx_stocks": ["investing_com", "yfinance"],
+    "brent_crude": ["fmp", "yfinance", "investing_com"],
+    "urea": ["investing_com", "yfinance"],
+    "technical_indicators": ["alpha_vantage", "fmp"],
+    "usd_egp": ["alpha_vantage", "yfinance"],
+    "gold": ["alpha_vantage", "yfinance"],
+    "sp500": ["fmp", "alpha_vantage", "yfinance"],
+}
+
+
+@dataclass
+class FetchResult:
+    """Result wrapper for data fetching operations."""
+
+    success: bool
+    data: pd.DataFrame | None
+    source: str
+    error_message: str | None = None
+    rows_fetched: int = 0
+
+
+class RateLimiter:
+    """Simple rate limiter to prevent API throttling."""
+
+    def __init__(self, calls_per_minute: int = 5):
+        self.min_interval = 60.0 / calls_per_minute
+        self.last_call_time: float | None = None
+
+    def wait(self) -> None:
+        """Wait if necessary to respect rate limits."""
+        if self.last_call_time is not None:
+            elapsed = time.time() - self.last_call_time
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+        self.last_call_time = time.time()
+
+
+# Global rate limiters
+alpha_vantage_limiter = RateLimiter(calls_per_minute=5)  # Free tier: 5 calls/min
+fmp_limiter = RateLimiter(calls_per_minute=10)  # FMP has higher limits
+investing_limiter = RateLimiter(calls_per_minute=3)  # Be gentle with investing.com
+
+
+class DataFetcher:
+    """
+    Multi-source data fetcher with fallback chain logic.
+
+    Primary sources:
+    - Investing.com: EGX Stocks, Urea Prices
+    - Alpha Vantage: Technical Indicators, Currency/Gold rates
+    - FMP: Global Macro Data (S&P 500, Brent Crude), Company financials
+    """
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+
+    # ==================== Alpha Vantage Methods ====================
+
+    def fetch_alpha_vantage_rsi(
+        self,
+        symbol: str,
+        interval: str = "daily",
+        time_period: int = 14,
+        series_type: str = "close",
+    ) -> FetchResult:
+        """
+        Fetch RSI technical indicator from Alpha Vantage.
+
+        Args:
+            symbol: Stock symbol (e.g., "SPY")
+            interval: Time interval (daily, weekly, monthly)
+            time_period: RSI calculation period
+            series_type: Price type (close, open, high, low)
+
+        Returns:
+            FetchResult with RSI data or error
+        """
+        alpha_vantage_limiter.wait()
+
+        params = {
+            "function": "RSI",
+            "symbol": symbol,
+            "interval": interval,
+            "time_period": time_period,
+            "series_type": series_type,
+            "apikey": ALPHA_VANTAGE_API_KEY,
+        }
+
+        try:
+            LOGGER.info(f"Fetching RSI from Alpha Vantage for {symbol}")
+            response = self.session.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            # Check for API error messages
+            if "Error Message" in data:
+                return FetchResult(
+                    success=False,
+                    data=None,
+                    source="alpha_vantage",
+                    error_message=data["Error Message"],
+                )
+
+            # Check for rate limit note
+            if "Note" in data and "API call frequency" in data["Note"]:
+                return FetchResult(
+                    success=False,
+                    data=None,
+                    source="alpha_vantage",
+                    error_message=f"Rate limited: {data['Note']}",
+                )
+
+            # Parse Technical Analysis data
+            ta_key = "Technical Analysis: RSI"
+            if ta_key not in data:
+                return FetchResult(
+                    success=False,
+                    data=None,
+                    source="alpha_vantage",
+                    error_message=f"RSI data not found in response. Keys: {list(data.keys())}",
+                )
+
+            rsi_data = data[ta_key]
+            records = []
+            for dt_str, values in rsi_data.items():
+                records.append({
+                    "timestamp": pd.to_datetime(dt_str),
+                    "rsi": float(values.get("RSI", 0)),
+                })
+
+            df = pd.DataFrame(records).sort_values("timestamp").reset_index(drop=True)
+
+            return FetchResult(
+                success=True,
+                data=df,
+                source="alpha_vantage",
+                rows_fetched=len(df),
+            )
+
+        except requests.exceptions.RequestException as e:
+            return FetchResult(
+                success=False,
+                data=None,
+                source="alpha_vantage",
+                error_message=f"Request failed: {str(e)}",
+            )
+        except Exception as e:
+            return FetchResult(
+                success=False,
+                data=None,
+                source="alpha_vantage",
+                error_message=f"Parse error: {str(e)}",
+            )
+
+    def fetch_alpha_vantage_macd(
+        self,
+        symbol: str,
+        interval: str = "daily",
+        fastperiod: int = 12,
+        slowperiod: int = 26,
+        signalperiod: int = 9,
+        series_type: str = "close",
+    ) -> FetchResult:
+        """Fetch MACD technical indicator from Alpha Vantage."""
+        alpha_vantage_limiter.wait()
+
+        params = {
+            "function": "MACD",
+            "symbol": symbol,
+            "interval": interval,
+            "fastperiod": fastperiod,
+            "slowperiod": slowperiod,
+            "signalperiod": signalperiod,
+            "series_type": series_type,
+            "apikey": ALPHA_VANTAGE_API_KEY,
+        }
+
+        try:
+            LOGGER.info(f"Fetching MACD from Alpha Vantage for {symbol}")
+            response = self.session.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if "Error Message" in data:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message=data["Error Message"],
+                )
+
+            if "Note" in data and "API call frequency" in data["Note"]:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message=f"Rate limited: {data['Note']}",
+                )
+
+            ta_key = "Technical Analysis: MACD"
+            if ta_key not in data:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message="MACD data not found in response",
+                )
+
+            macd_data = data[ta_key]
+            records = []
+            for dt_str, values in macd_data.items():
+                records.append({
+                    "timestamp": pd.to_datetime(dt_str),
+                    "macd": float(values.get("MACD", 0)),
+                    "macd_signal": float(values.get("MACD_Signal", 0)),
+                    "macd_hist": float(values.get("MACD_Hist", 0)),
+                })
+
+            df = pd.DataFrame(records).sort_values("timestamp").reset_index(drop=True)
+
+            return FetchResult(
+                success=True, data=df, source="alpha_vantage", rows_fetched=len(df),
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="alpha_vantage",
+                error_message=f"Error: {str(e)}",
+            )
+
+    def fetch_alpha_vantage_fx_rate(
+        self,
+        from_currency: str = "USD",
+        to_currency: str = "EGP",
+    ) -> FetchResult:
+        """
+        Fetch current FX rate from Alpha Vantage.
+
+        Returns:
+            FetchResult with current exchange rate
+        """
+        alpha_vantage_limiter.wait()
+
+        params = {
+            "function": "CURRENCY_EXCHANGE_RATE",
+            "from_currency": from_currency,
+            "to_currency": to_currency,
+            "apikey": ALPHA_VANTAGE_API_KEY,
+        }
+
+        try:
+            LOGGER.info(f"Fetching FX rate from Alpha Vantage: {from_currency}/{to_currency}")
+            response = self.session.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if "Error Message" in data:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message=data["Error Message"],
+                )
+
+            if "Note" in data:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message=f"Rate limited: {data['Note']}",
+                )
+
+            rate_key = "Realtime Currency Exchange Rate"
+            if rate_key not in data:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message="Exchange rate data not found",
+                )
+
+            rate_data = data[rate_key]
+            df = pd.DataFrame([{
+                "from_currency": rate_data.get("1. From_Currency Code"),
+                "to_currency": rate_data.get("3. To_Currency Code"),
+                "rate": float(rate_data.get("5. Exchange Rate", 0)),
+                "timestamp": rate_data.get("6. Last Refreshed"),
+            }])
+
+            return FetchResult(
+                success=True, data=df, source="alpha_vantage", rows_fetched=1,
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="alpha_vantage",
+                error_message=f"Error: {str(e)}",
+            )
+
+    def fetch_alpha_vantage_fx_daily(
+        self,
+        from_currency: str = "USD",
+        to_currency: str = "EGP",
+    ) -> FetchResult:
+        """Fetch daily FX time series from Alpha Vantage."""
+        alpha_vantage_limiter.wait()
+
+        params = {
+            "function": "FX_DAILY",
+            "from_symbol": from_currency,
+            "to_symbol": to_currency,
+            "apikey": ALPHA_VANTAGE_API_KEY,
+        }
+
+        try:
+            LOGGER.info(f"Fetching daily FX from Alpha Vantage: {from_currency}/{to_currency}")
+            response = self.session.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if "Error Message" in data:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message=data["Error Message"],
+                )
+
+            if "Note" in data:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message=f"Rate limited: {data['Note']}",
+                )
+
+            ts_key = "Time Series FX (Daily)"
+            if ts_key not in data:
+                return FetchResult(
+                    success=False, data=None, source="alpha_vantage",
+                    error_message="FX daily data not found",
+                )
+
+            fx_data = data[ts_key]
+            records = []
+            for date_str, values in fx_data.items():
+                records.append({
+                    "trade_date": pd.to_datetime(date_str),
+                    "open": float(values.get("1. open", 0)),
+                    "high": float(values.get("2. high", 0)),
+                    "low": float(values.get("3. low", 0)),
+                    "close": float(values.get("4. close", 0)),
+                })
+
+            df = pd.DataFrame(records).sort_values("trade_date").reset_index(drop=True)
+
+            return FetchResult(
+                success=True, data=df, source="alpha_vantage", rows_fetched=len(df),
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="alpha_vantage",
+                error_message=f"Error: {str(e)}",
+            )
+
+    # ==================== FMP Methods ====================
+
+    def fetch_fmp_quote(self, symbol: str) -> FetchResult:
+        """
+        Fetch latest quote from Financial Modeling Prep.
+
+        Args:
+            symbol: Stock/commodity symbol (e.g., "BZ=F" for Brent)
+
+        Returns:
+            FetchResult with quote data
+        """
+        fmp_limiter.wait()
+
+        url = f"{FMP_BASE_URL}/quote/{symbol}"
+        params = {"apikey": FMP_API_KEY}
+
+        try:
+            LOGGER.info(f"Fetching quote from FMP for {symbol}")
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data or not isinstance(data, list):
+                return FetchResult(
+                    success=False, data=None, source="fmp",
+                    error_message="Empty or invalid response from FMP",
+                )
+
+            quote = data[0]
+            df = pd.DataFrame([{
+                "symbol": quote.get("symbol"),
+                "price": quote.get("price"),
+                "change": quote.get("change"),
+                "change_percent": quote.get("changesPercentage"),
+                "timestamp": datetime.now(),
+            }])
+
+            return FetchResult(
+                success=True, data=df, source="fmp", rows_fetched=1,
+            )
+
+        except requests.exceptions.RequestException as e:
+            return FetchResult(
+                success=False, data=None, source="fmp",
+                error_message=f"Request failed: {str(e)}",
+            )
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="fmp",
+                error_message=f"Error: {str(e)}",
+            )
+
+    def fetch_fmp_historical(
+        self,
+        symbol: str,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> FetchResult:
+        """
+        Fetch historical price data from FMP.
+
+        Args:
+            symbol: Stock/commodity symbol
+            from_date: Start date (default: 30 days ago)
+            to_date: End date (default: today)
+
+        Returns:
+            FetchResult with historical OHLCV data
+        """
+        fmp_limiter.wait()
+
+        if to_date is None:
+            to_date = date.today()
+        if from_date is None:
+            from_date = to_date - timedelta(days=30)
+
+        url = f"{FMP_BASE_URL}/historical-price-full/{symbol}"
+        params = {
+            "apikey": FMP_API_KEY,
+            "from": from_date.strftime("%Y-%m-%d"),
+            "to": to_date.strftime("%Y-%m-%d"),
+        }
+
+        try:
+            LOGGER.info(f"Fetching historical from FMP for {symbol} ({from_date} to {to_date})")
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data or "historical" not in data:
+                return FetchResult(
+                    success=False, data=None, source="fmp",
+                    error_message="Historical data not found in response",
+                )
+
+            historical = data["historical"]
+            if not historical:
+                return FetchResult(
+                    success=False, data=None, source="fmp",
+                    error_message="Empty historical data",
+                )
+
+            records = []
+            for item in historical:
+                records.append({
+                    "trade_date": pd.to_datetime(item.get("date")),
+                    "open": float(item.get("open", 0)),
+                    "high": float(item.get("high", 0)),
+                    "low": float(item.get("low", 0)),
+                    "close": float(item.get("close", 0)),
+                    "volume": int(item.get("volume", 0)),
+                })
+
+            df = pd.DataFrame(records).sort_values("trade_date").reset_index(drop=True)
+
+            return FetchResult(
+                success=True, data=df, source="fmp", rows_fetched=len(df),
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="fmp",
+                error_message=f"Error: {str(e)}",
+            )
+
+    def fetch_fmp_commodity_quote(self, commodity: str = "BZ") -> FetchResult:
+        """
+        Fetch commodity quote from FMP.
+        BZ = Brent Crude, CL = WTI Crude
+        """
+        fmp_limiter.wait()
+
+        url = f"{FMP_BASE_URL}/quote/{commodity}"
+        params = {"apikey": FMP_API_KEY}
+
+        try:
+            LOGGER.info(f"Fetching commodity quote from FMP for {commodity}")
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data or not isinstance(data, list) or len(data) == 0:
+                return FetchResult(
+                    success=False, data=None, source="fmp",
+                    error_message="Empty commodity response from FMP",
+                )
+
+            quote = data[0]
+            df = pd.DataFrame([{
+                "symbol": quote.get("symbol"),
+                "name": quote.get("name"),
+                "price": quote.get("price"),
+                "change": quote.get("change"),
+                "change_percent": quote.get("changesPercentage"),
+                "day_low": quote.get("dayLow"),
+                "day_high": quote.get("dayHigh"),
+                "year_high": quote.get("yearHigh"),
+                "year_low": quote.get("yearLow"),
+                "volume": quote.get("volume"),
+                "timestamp": datetime.now(),
+            }])
+
+            return FetchResult(
+                success=True, data=df, source="fmp", rows_fetched=1,
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="fmp",
+                error_message=f"Error: {str(e)}",
+            )
+
+    # ==================== Investing.com Methods ====================
+
+    def fetch_investing_egx_stock(
+        self,
+        symbol: str,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> FetchResult:
+        """
+        Fetch EGX stock data from Investing.com using investpy.
+
+        Args:
+            symbol: EGX symbol (e.g., "COMI")
+            from_date: Start date
+            to_date: End date
+
+        Returns:
+            FetchResult with OHLCV data
+        """
+        investing_limiter.wait()
+
+        if to_date is None:
+            to_date = date.today()
+        if from_date is None:
+            from_date = to_date - timedelta(days=30)
+
+        try:
+            LOGGER.info(f"Fetching EGX stock from Investing.com: {symbol}")
+
+            # Try to import investpy
+            try:
+                import investpy
+            except ImportError:
+                return FetchResult(
+                    success=False, data=None, source="investing_com",
+                    error_message="investpy not installed",
+                )
+
+            # Search for the stock
+            search_results = investpy.search_quotes(text=symbol, products=["stocks"], countries=["egypt"], n_results=1)
+
+            if not search_results:
+                return FetchResult(
+                    success=False, data=None, source="investing_com",
+                    error_message=f"Stock {symbol} not found on Investing.com",
+                )
+
+            stock = search_results[0]
+
+            # Fetch historical data
+            df = stock.retrieve_historical_data(from_date=from_date.strftime("%d/%m/%Y"), to_date=to_date.strftime("%d/%m/%Y"))
+
+            if df is None or df.empty:
+                return FetchResult(
+                    success=False, data=None, source="investing_com",
+                    error_message="No historical data returned",
+                )
+
+            # Rename columns to standard format
+            df = df.reset_index()
+            df = df.rename(columns={
+                "Date": "trade_date",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+            })
+
+            return FetchResult(
+                success=True, data=df, source="investing_com", rows_fetched=len(df),
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="investing_com",
+                error_message=f"Error: {str(e)}",
+            )
+
+    def fetch_investing_commodity(
+        self,
+        commodity: str,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> FetchResult:
+        """
+        Fetch commodity data from Investing.com.
+
+        Args:
+            commodity: Commodity name (e.g., "Brent Oil", "Urea")
+            from_date: Start date
+            to_date: End date
+
+        Returns:
+            FetchResult with OHLCV data
+        """
+        investing_limiter.wait()
+
+        if to_date is None:
+            to_date = date.today()
+        if from_date is None:
+            from_date = to_date - timedelta(days=30)
+
+        try:
+            LOGGER.info(f"Fetching commodity from Investing.com: {commodity}")
+
+            try:
+                import investpy
+            except ImportError:
+                return FetchResult(
+                    success=False, data=None, source="investing_com",
+                    error_message="investpy not installed",
+                )
+
+            # Map common names to investpy names
+            commodity_map = {
+                "brent": "Brent Oil",
+                "brent crude": "Brent Oil",
+                "bz": "Brent Oil",
+                "urea": "Urea",
+            }
+
+            search_term = commodity_map.get(commodity.lower(), commodity)
+
+            # Search for the commodity
+            search_results = investpy.search_quotes(text=search_term, products=["commodities"], n_results=1)
+
+            if not search_results:
+                return FetchResult(
+                    success=False, data=None, source="investing_com",
+                    error_message=f"Commodity {commodity} not found on Investing.com",
+                )
+
+            comm = search_results[0]
+            df = comm.retrieve_historical_data(from_date=from_date.strftime("%d/%m/%Y"), to_date=to_date.strftime("%d/%m/%Y"))
+
+            if df is None or df.empty:
+                return FetchResult(
+                    success=False, data=None, source="investing_com",
+                    error_message="No historical data returned",
+                )
+
+            df = df.reset_index()
+            df = df.rename(columns={
+                "Date": "trade_date",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+            })
+
+            return FetchResult(
+                success=True, data=df, source="investing_com", rows_fetched=len(df),
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="investing_com",
+                error_message=f"Error: {str(e)}",
+            )
+
+    # ==================== Fallback Chain Methods ====================
+
+    def fetch_with_fallback(
+        self,
+        data_type: str,
+        fetchers: list[Callable[[], FetchResult]],
+    ) -> FetchResult:
+        """
+        Execute fetchers in order until one succeeds.
+
+        Args:
+            data_type: Type of data being fetched (for logging)
+            fetchers: List of fetcher functions to try in order
+
+        Returns:
+            First successful FetchResult or last failure
+        """
+        last_error = None
+
+        for i, fetcher in enumerate(fetchers):
+            result = fetcher()
+            if result.success:
+                LOGGER.info(f"Successfully fetched {data_type} from {result.source}")
+                return result
+            else:
+                LOGGER.warning(f"Fetcher {i+1} failed for {data_type}: {result.error_message}")
+                last_error = result
+
+        LOGGER.error(f"All fetchers failed for {data_type}")
+        return last_error or FetchResult(
+            success=False, data=None, source="none",
+            error_message="All data sources failed",
+        )
+
+    def fetch_egx_stock(self, symbol: str, days: int = 30) -> FetchResult:
+        """Fetch EGX stock with fallback chain."""
+        to_date = date.today()
+        from_date = to_date - timedelta(days=days)
+
+        return self.fetch_with_fallback(
+            f"EGX stock {symbol}",
+            [
+                lambda: self.fetch_investing_egx_stock(symbol, from_date, to_date),
+                # Fallback to yfinance with .CA suffix
+                lambda: self._fetch_yfinance_egx(symbol, from_date, to_date),
+            ],
+        )
+
+    def fetch_brent_crude(self, days: int = 30) -> FetchResult:
+        """Fetch Brent Crude with fallback chain."""
+        to_date = date.today()
+        from_date = to_date - timedelta(days=days)
+
+        return self.fetch_with_fallback(
+            "Brent Crude",
+            [
+                lambda: self.fetch_fmp_historical("BZ=F", from_date, to_date),
+                lambda: self._fetch_yfinance("BZ=F", from_date, to_date),
+                lambda: self.fetch_investing_commodity("Brent", from_date, to_date),
+            ],
+        )
+
+    def fetch_urea(self, days: int = 30) -> FetchResult:
+        """Fetch Urea prices with fallback chain."""
+        to_date = date.today()
+        from_date = to_date - timedelta(days=days)
+
+        return self.fetch_with_fallback(
+            "Urea",
+            [
+                lambda: self.fetch_investing_commodity("Urea", from_date, to_date),
+                lambda: self._fetch_yfinance_urea(from_date, to_date),
+            ],
+        )
+
+    def fetch_usd_egp(self, days: int = 30) -> FetchResult:
+        """Fetch USD/EGP rates with fallback chain."""
+        to_date = date.today()
+        from_date = to_date - timedelta(days=days)
+
+        return self.fetch_with_fallback(
+            "USD/EGP",
+            [
+                lambda: self.fetch_alpha_vantage_fx_daily("USD", "EGP"),
+                lambda: self._fetch_yfinance("EGP=X", from_date, to_date),
+            ],
+        )
+
+    def fetch_sp500(self, days: int = 30) -> FetchResult:
+        """Fetch S&P 500 data with fallback chain."""
+        to_date = date.today()
+        from_date = to_date - timedelta(days=days)
+
+        return self.fetch_with_fallback(
+            "S&P 500",
+            [
+                lambda: self.fetch_fmp_historical("SPY", from_date, to_date),
+                lambda: self._fetch_yfinance("SPY", from_date, to_date),
+            ],
+        )
+
+    def fetch_rsi(self, symbol: str) -> FetchResult:
+        """Fetch RSI with fallback chain."""
+        return self.fetch_with_fallback(
+            f"RSI for {symbol}",
+            [
+                lambda: self.fetch_alpha_vantage_rsi(symbol),
+            ],
+        )
+
+    # ==================== yfinance Fallback Methods ====================
+
+    def _fetch_yfinance(
+        self,
+        symbol: str,
+        from_date: date,
+        to_date: date,
+    ) -> FetchResult:
+        """Fallback fetcher using yfinance."""
+        try:
+            import yfinance as yf
+
+            LOGGER.info(f"Fetching from yfinance: {symbol}")
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(start=from_date.isoformat(), end=to_date.isoformat())
+
+            if hist.empty:
+                return FetchResult(
+                    success=False, data=None, source="yfinance",
+                    error_message="No data returned",
+                )
+
+            df = hist.reset_index()
+            df = df.rename(columns={
+                "Date": "trade_date",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+            })
+
+            return FetchResult(
+                success=True, data=df, source="yfinance", rows_fetched=len(df),
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="yfinance",
+                error_message=f"Error: {str(e)}",
+            )
+
+    def _fetch_yfinance_egx(self, symbol: str, from_date: date, to_date: date) -> FetchResult:
+        """Fetch EGX stock from yfinance with .CA suffix."""
+        # EGX stocks typically use .CA suffix on Yahoo Finance
+        yf_symbol = f"{symbol}.CA" if not symbol.endswith(".CA") else symbol
+        return self._fetch_yfinance(yf_symbol, from_date, to_date)
+
+    def _fetch_yfinance_urea(self, from_date: date, to_date: date) -> FetchResult:
+        """Fetch Urea from yfinance using proxy tickers."""
+        # Try various fertilizer proxies
+        for ticker in ["Urea=F", "FERT=F", "CF"]:
+            result = self._fetch_yfinance(ticker, from_date, to_date)
+            if result.success:
+                # Rename to Urea for consistency
+                if result.data is not None:
+                    result.data["commodity_name"] = "Urea"
+                return result
+        return FetchResult(
+            success=False, data=None, source="yfinance",
+            error_message="No urea proxy data available",
+        )
+
+
+def create_fetcher() -> DataFetcher:
+    """Factory function to create a DataFetcher instance."""
+    return DataFetcher()

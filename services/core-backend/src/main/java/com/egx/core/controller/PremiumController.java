@@ -22,11 +22,15 @@ import com.egx.core.client.AiClient;
 import com.egx.core.client.dto.AiBacktestRequest;
 import com.egx.core.client.dto.AiBacktestResponse;
 import com.egx.core.client.dto.AiConstraintsPayload;
+import com.egx.core.domain.DailyAiSignal;
 import com.egx.core.domain.PortfolioRun;
+import com.egx.core.domain.StockInstrument;
 import com.egx.core.domain.StopRule;
 import com.egx.core.domain.enums.RiskLevel;
 import com.egx.core.domain.enums.SubscriptionTier;
+import com.egx.core.repository.DailyAiSignalRepository;
 import com.egx.core.repository.PortfolioRunRepository;
+import com.egx.core.repository.StockInstrumentRepository;
 import com.egx.core.repository.StopRuleRepository;
 import com.egx.core.service.PremiumAccessService;
 import com.egx.core.service.TearSheetService;
@@ -48,19 +52,25 @@ public class PremiumController {
     private final StopRuleRepository stopRuleRepository;
     private final TearSheetService tearSheetService;
     private final PortfolioRunRepository portfolioRunRepository;
+    private final StockInstrumentRepository stockInstrumentRepository;
+    private final DailyAiSignalRepository dailyAiSignalRepository;
 
     public PremiumController(
             PremiumAccessService premiumAccessService,
             AiClient aiClient,
             StopRuleRepository stopRuleRepository,
             TearSheetService tearSheetService,
-            PortfolioRunRepository portfolioRunRepository
+            PortfolioRunRepository portfolioRunRepository,
+            StockInstrumentRepository stockInstrumentRepository,
+            DailyAiSignalRepository dailyAiSignalRepository
     ) {
         this.premiumAccessService = premiumAccessService;
         this.aiClient = aiClient;
         this.stopRuleRepository = stopRuleRepository;
         this.tearSheetService = tearSheetService;
         this.portfolioRunRepository = portfolioRunRepository;
+        this.stockInstrumentRepository = stockInstrumentRepository;
+        this.dailyAiSignalRepository = dailyAiSignalRepository;
     }
 
     @PostMapping("/backtest")
@@ -100,14 +110,27 @@ public class PremiumController {
         rule.setUpdatedAt(LocalDateTime.now());
 
         StopRule saved = stopRuleRepository.save(rule);
+        // Enrich with AI signal data for the response
+        StockInstrument stock = stockInstrumentRepository.findById(saved.getStockId()).orElse(null);
+        String symbol = stock != null ? stock.getSymbol() : null;
+        DailyAiSignal signal = null;
+        if (symbol != null) {
+            signal = dailyAiSignalRepository.findLatestBySymbol(symbol).orElse(null);
+        }
+
         return new StopRuleResponse(
                 saved.getId(),
                 saved.getUserId(),
                 saved.getStockId(),
+                symbol,
                 saved.getPortfolioRunId(),
                 saved.getStopLossPct(),
                 saved.getTakeProfitPct(),
-                saved.getIsActive()
+                saved.getIsActive(),
+                signal != null ? signal.getConfidenceScore() : null,
+                null, // predictedReturn5d removed (5NF compliance)
+                signal != null ? signal.getAction() : "UNKNOWN",
+                List.of() // xaiReasons removed (4NF compliance - now in signal_xai_reasons table)
         );
     }
 
@@ -118,16 +141,41 @@ public class PremiumController {
 
         return stopRuleRepository.findByUserIdOrderByUpdatedAtDesc(userId)
                 .stream()
-                .map(rule -> new StopRuleResponse(
-                        rule.getId(),
-                        rule.getUserId(),
-                        rule.getStockId(),
-                        rule.getPortfolioRunId(),
-                        rule.getStopLossPct(),
-                        rule.getTakeProfitPct(),
-                        rule.getIsActive()
-                ))
+                .map(this::enrichStopRuleWithAiSignal)
                 .toList();
+    }
+
+    private StopRuleResponse enrichStopRuleWithAiSignal(StopRule rule) {
+        StockInstrument stock = stockInstrumentRepository.findById(rule.getStockId()).orElse(null);
+        String symbol = stock != null ? stock.getSymbol() : null;
+
+        // Fetch latest AI signal if available
+        DailyAiSignal signal = null;
+        if (symbol != null) {
+            signal = dailyAiSignalRepository.findLatestBySymbol(symbol).orElse(null);
+        }
+
+        return new StopRuleResponse(
+                rule.getId(),
+                rule.getUserId(),
+                rule.getStockId(),
+                symbol,  // Include symbol instead of just stockId
+                rule.getPortfolioRunId(),
+                rule.getStopLossPct(),
+                rule.getTakeProfitPct(),
+                rule.getIsActive(),
+                signal != null ? signal.getConfidenceScore() : null,
+                null, // predictedReturn5d removed (5NF compliance)
+                signal != null ? signal.getAction() : "UNKNOWN",
+                List.of() // xaiReasons removed (4NF compliance - now in signal_xai_reasons table)
+        );
+    }
+
+    private List<String> parseXaiReasons(String reasons) {
+        if (reasons == null || reasons.isBlank()) {
+            return List.of();
+        }
+        return List.of(reasons.split("; "));
     }
 
     @GetMapping("/tear-sheet/{portfolioRunId}")
@@ -181,14 +229,22 @@ public class PremiumController {
     ) {
     }
 
+    /**
+     * Enriched Stop Rule Response with AI signal data for Market Watch.
+     */
     public record StopRuleResponse(
             Long id,
             Long userId,
             Long stockId,
+            String symbol,              // Stock symbol (e.g., "COMI.CA")
             Long portfolioRunId,
             BigDecimal stopLossPct,
             BigDecimal takeProfitPct,
-            Boolean isActive
+            Boolean isActive,
+            BigDecimal confidenceScore, // AI confidence (0.0 - 1.0)
+            BigDecimal predictedReturn5d, // 5-day predicted return
+            String action,              // BUY, HOLD, SELL, PREVENTIVE_SELL, UNKNOWN
+            List<String> xaiReasons     // Explainable AI reasons
     ) {
     }
 }

@@ -14,7 +14,7 @@ import pandas as pd
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SENTIMENT_CACHE = Path(__file__).resolve().parent / "data" / "sp500_cache.csv"
-STOOQ_API_KEY = "gBZC9gxVWkS8T1enmvDRPJu04f2tqiwh"
+STOOQ_API_KEY = "hJT6KeBilo3mhwfEVpx5u8QcgWLj2t9X"
 SP500_STOOQ_BASE_URL = "https://stooq.com/q/d/l/?s=^spx&i=d&apikey={apikey}&f={start}&t={end}"
 
 
@@ -73,6 +73,33 @@ def _download_sp500_prices(start_date: pd.Timestamp, end_date: pd.Timestamp) -> 
         return frame[["trade_date", "close_price"]].reset_index(drop=True)
 
     return pd.DataFrame(columns=["trade_date", "close_price"])
+
+
+def _compute_egx30_volatility_proxy(daily_returns: pd.Series, window: int = 20) -> pd.Series:
+    """
+    Compute S&P500 proxy using EGX30 volatility.
+    Logic: High EGX30 volatility correlates with global market stress (S&P500 downside).
+    Returns a synthetic 'sp500_return' series based on EGX30 volatility patterns.
+    """
+    returns_clean = pd.to_numeric(daily_returns, errors="coerce").fillna(0.0)
+
+    # Compute rolling volatility (annualized)
+    rolling_vol = returns_clean.rolling(window=window, min_periods=5).std() * np.sqrt(252)
+    rolling_vol = rolling_vol.fillna(rolling_vol.median())
+
+    # Normalize volatility to create correlation-like signal
+    vol_normalized = (rolling_vol - rolling_vol.min()) / (rolling_vol.max() - rolling_vol.min() + 1e-10)
+
+    # EGX30 returns component (smoothed)
+    egx_smooth = returns_clean.rolling(window=3, min_periods=1).mean()
+
+    # Proxy formula: EGX30 returns dampened by volatility factor
+    # High volatility = more negative correlation (market stress)
+    # Low volatility = positive correlation (normal markets)
+    vol_factor = 1.0 - (2.0 * vol_normalized)  # Range: -1 (high vol) to +1 (low vol)
+
+    proxy = egx_smooth * 0.6 + vol_factor * 0.004  # Scale to realistic daily returns
+    return proxy.fillna(0.0)
 
 
 def _load_sp500_returns(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
@@ -144,10 +171,10 @@ def build_market_sentiment_frame(input_frame: pd.DataFrame) -> pd.DataFrame:
     sp500 = _load_sp500_returns(start_date=start_date, end_date=end_date)
 
     if sp500.empty:
-        usd_component = _safe_series(daily, "usd_egp_return")
-        gold_component = _safe_series(daily, "gold_return")
-        proxy_sp500 = ((-0.55 * usd_component) + (0.45 * gold_component)).rolling(window=3, min_periods=1).mean()
-        daily["sp500_return"] = proxy_sp500.to_numpy(dtype=float)
+        LOGGER.info("S&P500 data unavailable, using EGX30 volatility proxy for S&P500 correlation")
+        # Use EGX30 volatility-based proxy for S&P500 correlation
+        egx30_returns = pd.to_numeric(daily.get("egx30_return"), errors="coerce").fillna(0.0)
+        daily["sp500_return"] = _compute_egx30_volatility_proxy(egx30_returns).to_numpy(dtype=float)
     else:
         daily = daily.merge(sp500, on="trade_date", how="left")
         daily["sp500_return"] = pd.to_numeric(daily.get("sp500_return"), errors="coerce")

@@ -19,15 +19,16 @@ from .optimizer import optimize_max_sharpe
 
 MODEL_VERSION = "mpt-egx30-backtest-v2-learning"
 FORWARD_HORIZON_DAYS = 90
-SMART_MAX_SECTOR_CAP = 0.30
-SMART_MIN_CONFIDENCE = 0.55
+SMART_MAX_SECTOR_CAP = 0.40
+SMART_MIN_CONFIDENCE = 0.50
 
 
 def run_backtest(payload: BacktestRequest) -> BacktestResponse:
     warnings: list[str] = []
-    enforced_sector_cap = min(float(payload.constraints.max_sector_weight), SMART_MAX_SECTOR_CAP)
-    if enforced_sector_cap < float(payload.constraints.max_sector_weight):
-        warnings.append("Sector cap enforced at 30% for Smart Optimizer backtest")
+    # FIXED: Use request's max_sector_weight directly without hardcoded ceiling
+    enforced_sector_cap = float(payload.constraints.max_sector_weight)
+    if enforced_sector_cap > 0.5:
+        warnings.append(f"Sector cap set to {enforced_sector_cap:.0%} (high concentration risk)")
 
     adaptive_params, adaptive_warnings = resolve_adaptive_parameters(payload.risk_level)
     warnings.extend(adaptive_warnings)
