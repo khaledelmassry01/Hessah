@@ -790,6 +790,7 @@ export async function fetchStopRules(): Promise<StopRule[]> {
         id: toNumber(item.id) ?? 0,
         userId: toNumber(item.userId) ?? toNumber(item.user_id),
         stockId: toNumber(item.stockId) ?? toNumber(item.stock_id),
+        symbol: toStringValue(item.symbol),
         portfolioRunId:
           toNumber(item.portfolioRunId) ?? toNumber(item.portfolio_run_id),
         stopLossPct: toNumber(item.stopLossPct) ?? toNumber(item.stop_loss_pct),
@@ -797,6 +798,11 @@ export async function fetchStopRules(): Promise<StopRule[]> {
           toNumber(item.takeProfitPct) ?? toNumber(item.take_profit_pct),
         isActive: Boolean(item.isActive ?? item.is_active),
         status: toStringValue(item.status),
+        confidenceScore: toNumber(item.confidenceScore) ?? toNumber(item.confidence_score),
+        predictedReturn5d: toNumber(item.predictedReturn5d) ?? toNumber(item.predicted_return_5d),
+        action: toStringValue(item.action),
+        xaiReasons: Array.isArray(item.xaiReasons) ? item.xaiReasons : 
+                   Array.isArray(item.xai_reasons) ? item.xai_reasons : [],
       }));
   } catch {
     return [];

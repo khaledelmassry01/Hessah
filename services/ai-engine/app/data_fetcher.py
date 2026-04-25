@@ -19,15 +19,17 @@ LOGGER = logging.getLogger(__name__)
 # API Keys
 ALPHA_VANTAGE_API_KEY = "HEDCR99YILNP6A4A"
 FMP_API_KEY = "8ID9U3FQCVXMxIJms5jmQxRtQMUBl4aV"
+EODHD_API_KEY = "69e67350a20f86.57807831"
 
 # API Endpoints
 ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+EODHD_BASE_URL = "https://eodhd.com/api"
 
 # Source priority for fallback chain
 FALLBACK_CHAIN = {
-    "egx_stocks": ["investing_com", "yfinance"],
-    "brent_crude": ["fmp", "yfinance", "investing_com"],
+    "egx_stocks": ["eodhd", "investing_com", "yfinance"],
+    "brent_crude": ["eodhd", "fmp", "yfinance", "investing_com"],
     "urea": ["investing_com", "yfinance"],
     "technical_indicators": ["alpha_vantage", "fmp"],
     "usd_egp": ["alpha_vantage", "yfinance"],
@@ -67,6 +69,7 @@ class RateLimiter:
 alpha_vantage_limiter = RateLimiter(calls_per_minute=5)  # Free tier: 5 calls/min
 fmp_limiter = RateLimiter(calls_per_minute=10)  # FMP has higher limits
 investing_limiter = RateLimiter(calls_per_minute=3)  # Be gentle with investing.com
+eodhd_limiter = RateLimiter(calls_per_minute=20)  # EODHD generous limits
 
 
 class DataFetcher:
@@ -74,9 +77,10 @@ class DataFetcher:
     Multi-source data fetcher with fallback chain logic.
 
     Primary sources:
-    - Investing.com: EGX Stocks, Urea Prices
+    - EODHD: EGX Stocks (via GDRs), Brent Crude (via BNO ETF)
+    - Investing.com: Urea Prices, EGX fallback
     - Alpha Vantage: Technical Indicators, Currency/Gold rates
-    - FMP: Global Macro Data (S&P 500, Brent Crude), Company financials
+    - FMP: Global Macro Data (S&P 500, Brent fallback), Company financials
     """
 
     def __init__(self):
@@ -552,6 +556,168 @@ class DataFetcher:
                 error_message=f"Error: {str(e)}",
             )
 
+    # ==================== EODHD Methods ====================
+
+    def fetch_eodhd_historical(
+        self,
+        symbol: str,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> FetchResult:
+        """
+        Fetch historical price data from EODHD.
+
+        Args:
+            symbol: EODHD ticker symbol (e.g., "CBKD.LSE" for CIB Egypt, "BNO" for Brent)
+            from_date: Start date (default: 30 days ago)
+            to_date: End date (default: today)
+
+        Returns:
+            FetchResult with historical OHLCV data
+        """
+        eodhd_limiter.wait()
+
+        if to_date is None:
+            to_date = date.today()
+        if from_date is None:
+            from_date = to_date - timedelta(days=30)
+
+        url = f"{EODHD_BASE_URL}/eod/{symbol}"
+        params = {
+            "api_token": EODHD_API_KEY,
+            "fmt": "json",
+            "from": from_date.strftime("%Y-%m-%d"),
+            "to": to_date.strftime("%Y-%m-%d"),
+        }
+
+        try:
+            LOGGER.info(f"Fetching historical from EODHD for {symbol} ({from_date} to {to_date})")
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data or not isinstance(data, list) or len(data) == 0:
+                return FetchResult(
+                    success=False, data=None, source="eodhd",
+                    error_message="Empty or invalid response from EODHD",
+                )
+
+            records = []
+            for item in data:
+                records.append({
+                    "trade_date": pd.to_datetime(item.get("date")),
+                    "open": float(item.get("open", 0)),
+                    "high": float(item.get("high", 0)),
+                    "low": float(item.get("low", 0)),
+                    "close": float(item.get("close", 0)),
+                    "volume": int(item.get("volume", 0)),
+                    "adjusted_close": float(item.get("adjusted_close", 0)),
+                })
+
+            df = pd.DataFrame(records).sort_values("trade_date").reset_index(drop=True)
+
+            return FetchResult(
+                success=True, data=df, source="eodhd", rows_fetched=len(df),
+            )
+
+        except requests.exceptions.RequestException as e:
+            return FetchResult(
+                success=False, data=None, source="eodhd",
+                error_message=f"Request failed: {str(e)}",
+            )
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="eodhd",
+                error_message=f"Error: {str(e)}",
+            )
+
+    def fetch_eodhd_egx_stock(
+        self,
+        symbol: str,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> FetchResult:
+        """
+        Fetch EGX stock data from EODHD using GDR listings.
+
+        Maps internal symbols to EODHD ticker formats:
+        - COMI.CA -> CBKD.LSE (CIB Egypt GDR on LSE)
+        - CIBEY -> CIBEY (CIB Egypt OTC)
+
+        IMPORTANT: .LSE tickers return USD prices (GDRs). These are converted
+        to EGP using the current USD/EGP exchange rate to match local EGX prices.
+
+        Args:
+            symbol: Internal EGX symbol (e.g., "COMI.CA", "COMI")
+            from_date: Start date
+            to_date: End date
+
+        Returns:
+            FetchResult with OHLCV data in EGP currency
+        """
+        # Map internal EGX symbols to EODHD tickers
+        egx_to_eodhd = {
+            "COMI": "CBKD.LSE",      # Commercial International Bank Egypt GDR
+            "COMI.CA": "CBKD.LSE",   # Same GDR, different internal naming
+            "CIBEY": "CIBEY",        # CIB Egypt OTC
+            "CBKD": "CBKD.LSE",      # Direct mapping to GDR
+        }
+
+        # Default: try the symbol as-is with .LSE suffix if it looks like an EGX stock
+        eodhd_symbol = egx_to_eodhd.get(symbol.upper(), None)
+
+        if eodhd_symbol is None:
+            # If not in mapping, assume it's already an EODHD ticker
+            eodhd_symbol = symbol
+
+        LOGGER.info(f"Mapped EGX symbol {symbol} to EODHD ticker {eodhd_symbol}")
+
+        # Fetch data from EODHD
+        result = self.fetch_eodhd_historical(eodhd_symbol, from_date, to_date)
+
+        # If it's a London Stock Exchange GDR (.LSE suffix), convert USD to EGP
+        if result.success and result.data is not None and eodhd_symbol.endswith(".LSE"):
+            LOGGER.info(f"Converting {eodhd_symbol} prices from USD to EGP")
+
+            # Fetch current USD/EGP exchange rate
+            fx_result = self.fetch_alpha_vantage_fx_rate("USD", "EGP")
+
+            if fx_result.success and fx_result.data is not None:
+                usd_egp_rate = float(fx_result.data.iloc[0]["rate"])
+                LOGGER.info(f"USD/EGP exchange rate: {usd_egp_rate}")
+
+                # Convert OHLC prices from USD to EGP
+                price_columns = ["open", "high", "low", "close", "adjusted_close"]
+                for col in price_columns:
+                    if col in result.data.columns:
+                        result.data[col] = result.data[col] * usd_egp_rate
+
+                LOGGER.info(f"Prices converted to EGP using rate {usd_egp_rate}")
+            else:
+                LOGGER.warning(f"Failed to get USD/EGP rate: {fx_result.error_message}. Returning USD prices.")
+
+        return result
+
+    def fetch_eodhd_brent_crude(
+        self,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> FetchResult:
+        """
+        Fetch Brent Crude data from EODHD using BNO ETF.
+
+        BNO (United States Brent Oil Fund) tracks Brent Crude futures prices.
+
+        Args:
+            from_date: Start date
+            to_date: End date
+
+        Returns:
+            FetchResult with OHLCV data
+        """
+        LOGGER.info("Fetching Brent Crude from EODHD via BNO ETF")
+        return self.fetch_eodhd_historical("BNO", from_date, to_date)
+
     # ==================== Investing.com Methods ====================
 
     def fetch_investing_egx_stock(
@@ -749,27 +915,36 @@ class DataFetcher:
         )
 
     def fetch_egx_stock(self, symbol: str, days: int = 30) -> FetchResult:
-        """Fetch EGX stock with fallback chain."""
+        """
+        Fetch EGX stock with fallback chain.
+        Primary: EODHD (via GDR listings like CBKD.LSE)
+        Fallback: Investing.com, yfinance
+        """
         to_date = date.today()
         from_date = to_date - timedelta(days=days)
 
         return self.fetch_with_fallback(
             f"EGX stock {symbol}",
             [
+                lambda: self.fetch_eodhd_egx_stock(symbol, from_date, to_date),
                 lambda: self.fetch_investing_egx_stock(symbol, from_date, to_date),
-                # Fallback to yfinance with .CA suffix
                 lambda: self._fetch_yfinance_egx(symbol, from_date, to_date),
             ],
         )
 
     def fetch_brent_crude(self, days: int = 30) -> FetchResult:
-        """Fetch Brent Crude with fallback chain."""
+        """
+        Fetch Brent Crude with fallback chain.
+        Primary: EODHD (via BNO ETF)
+        Fallback: FMP, yfinance, Investing.com
+        """
         to_date = date.today()
         from_date = to_date - timedelta(days=days)
 
         return self.fetch_with_fallback(
             "Brent Crude",
             [
+                lambda: self.fetch_eodhd_brent_crude(from_date, to_date),
                 lambda: self.fetch_fmp_historical("BZ=F", from_date, to_date),
                 lambda: self._fetch_yfinance("BZ=F", from_date, to_date),
                 lambda: self.fetch_investing_commodity("Brent", from_date, to_date),

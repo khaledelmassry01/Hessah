@@ -24,21 +24,29 @@ DEFAULT_LOOKBACK_START = date(2016, 1, 1)
 UREA_SYMBOL_ROOTS = {"ABUK", "MFPC"}
 BRENT_SYMBOL_ROOTS = {"AMOC", "SKPC"}
 
-# Unified FEATURE_COLUMNS - 32 features matching feature_factory.py
+# Unified FEATURE_COLUMNS - 35 features matching feature_factory.py
 # Training-Serving Skew Fix: All features must be present in both training and serving
+# Classification Enhancement: Added Bollinger Width, EMA200 distance, RSI Divergence
 FEATURE_COLUMNS = [
     "daily_return",
+    "return_1d_lag1",
+    "return_1d_lag2",
+    "return_1d_lag3",
     "ema_20",
     "ema_50",
     "ema_200",
+    "ema_200_distance",
     "rsi_14",
+    "rsi_divergence_14",
     "macd",
     "macd_signal",
     "macd_hist",
     "bollinger_mid_20",
     "bollinger_upper_20",
     "bollinger_lower_20",
+    "bollinger_width_20",
     "atr_14",
+    "atr_14_pct",
     "usd_egp_return",
     "gold_return",
     "stock_usd_corr_20d",
@@ -392,6 +400,36 @@ def compute_rsi(close_series: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 
+def compute_rsi_divergence(close_series: pd.Series, rsi_series: pd.Series, lookback: int = 5) -> pd.Series:
+    """
+    Compute RSI divergence to detect trend exhaustion.
+    Returns: +1 for bullish divergence, -1 for bearish divergence, 0 for no divergence
+    """
+    # Price trends
+    price_high = close_series.rolling(window=lookback, min_periods=3).max()
+    price_low = close_series.rolling(window=lookback, min_periods=3).min()
+    price_trend = np.where(close_series > price_high.shift(1), 1,
+                          np.where(close_series < price_low.shift(1), -1, 0))
+
+    # RSI trends
+    rsi_high = rsi_series.rolling(window=lookback, min_periods=3).max()
+    rsi_low = rsi_series.rolling(window=lookback, min_periods=3).min()
+    rsi_trend = np.where(rsi_series > rsi_high.shift(1), 1,
+                        np.where(rsi_series < rsi_low.shift(1), -1, 0))
+
+    # Divergence detection
+    # Bullish divergence: Price makes lower low, RSI makes higher low
+    # Bearish divergence: Price makes higher high, RSI makes lower high
+    bullish_div = (price_trend == -1) & (rsi_trend >= 0)
+    bearish_div = (price_trend == 1) & (rsi_trend <= 0)
+
+    divergence = pd.Series(0, index=close_series.index, dtype=float)
+    divergence[bullish_div] = 1.0   # Bullish divergence
+    divergence[bearish_div] = -1.0  # Bearish divergence
+
+    return divergence
+
+
 def compute_atr(group: pd.DataFrame, period: int = 14) -> pd.Series:
     """Compute Average True Range (ATR) for volatility measurement.
 
@@ -440,9 +478,26 @@ def add_technical_indicators(raw_frame: pd.DataFrame) -> pd.DataFrame:
         local["bollinger_mid_20"] = close.rolling(window=20, min_periods=20).mean()
         local["bollinger_upper_20"] = local["bollinger_mid_20"] + (2.0 * rolling_std_20)
         local["bollinger_lower_20"] = local["bollinger_mid_20"] - (2.0 * rolling_std_20)
+        # Bollinger Band Width - measures squeeze/volatility (Classification Enhancement)
+        local["bollinger_width_20"] = (local["bollinger_upper_20"] - local["bollinger_lower_20"]) / local["bollinger_mid_20"].replace(0, np.nan)
+        local["bollinger_width_20"] = local["bollinger_width_20"].fillna(0.0)
 
         local["rsi_14"] = compute_rsi(close, period=14)
+        # RSI Divergence - detects trend exhaustion (Classification Enhancement)
+        local["rsi_divergence_14"] = compute_rsi_divergence(close, local["rsi_14"])
         local["atr_14"] = compute_atr(local, period=14)  # Added for training-serving skew fix
+        # ATR as percentage of close price for volatility normalization
+        local["atr_14_pct"] = local["atr_14"] / close.replace(0, np.nan)
+        local["atr_14_pct"] = local["atr_14_pct"].fillna(0.0)
+
+        # Lag features for short-term sequential memory
+        local["return_1d_lag1"] = local["daily_return"].shift(1)
+        local["return_1d_lag2"] = local["daily_return"].shift(2)
+        local["return_1d_lag3"] = local["daily_return"].shift(3)
+
+        # Distance from 200-day EMA - identifies long-term trend (Classification Enhancement)
+        local["ema_200_distance"] = (close - local["ema_200"]) / local["ema_200"].replace(0, np.nan)
+        local["ema_200_distance"] = local["ema_200_distance"].fillna(0.0)
 
         volume_float = local["volume"].astype(float)
         local["volume_60d_avg"] = volume_float.rolling(window=60, min_periods=20).mean()
@@ -478,12 +533,36 @@ def build_feature_dataset(
         local = group.copy()
         local["target_close_5d"] = local["close_price"].shift(-horizon_days)
         local["target_return_5d"] = (local["target_close_5d"] / local["close_price"]) - 1.0
+
+        # Dynamic Volatility-Adjusted Thresholds:
+        # Use ATR_pct if available, otherwise fall back to rolling 20-day std of returns
+        if "atr_14_pct" in local.columns and local["atr_14_pct"].notna().any():
+            # Use ATR_pct * 1.5 as dynamic threshold multiplier
+            volatility_threshold = local["atr_14_pct"] * 1.5
+        else:
+            # Fallback: rolling 20-day standard deviation of daily returns
+            volatility_threshold = local["daily_return"].rolling(window=20, min_periods=10).std() * np.sqrt(5) * 1.5
+
+        # Fill any remaining NaN with a conservative default (2% / 1.5 = ~1.33%)
+        volatility_threshold = volatility_threshold.fillna(0.0133)
+
+        # Dynamic Classification:
+        # Class 2 (BUY): 5-day return > (ATR_pct * 1.5) - above normal volatility-based upside
+        # Class 0 (SELL): 5-day return < -(ATR_pct * 1.5) - below normal volatility-based downside
+        # Class 1 (HOLD): Everything in between
+        conditions = [
+            local["target_return_5d"] > volatility_threshold,    # BUY: above dynamic threshold
+            local["target_return_5d"] < -volatility_threshold,   # SELL: below negative dynamic threshold
+        ]
+        choices = [2, 0]  # BUY=2, SELL=0
+        local["target_class_5d"] = np.select(conditions, choices, default=1)  # HOLD=1
+
         return local
 
     dataset = enriched.groupby("symbol", group_keys=False).apply(_build_targets).reset_index(drop=True)
     dataset = dataset.groupby("symbol", group_keys=False).apply(lambda group: group.ffill()).reset_index(drop=True)
 
-    required_columns = FEATURE_COLUMNS + ["target_close_5d", "target_return_5d"]
+    required_columns = FEATURE_COLUMNS + ["target_close_5d", "target_return_5d", "target_class_5d"]
     dataset = dataset.dropna(subset=required_columns)
 
     symbols = sorted({str(item) for item in dataset["symbol"].unique().tolist()})

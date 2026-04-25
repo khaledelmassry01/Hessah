@@ -50,7 +50,7 @@ export function MarketWatchPage() {
       ? rulesQuery.data.map((item: StopRule) => ({
           id: item.id,
           stockId: item.stockId,
-          symbol: item.symbol ?? String(item.stockId) ?? "-",
+          symbol: item.symbol, // Use symbol directly from backend
           confidenceScore: item.confidenceScore ?? undefined,
           predictedReturn5d: item.predictedReturn5d ?? undefined,
           action: item.action ?? undefined,
@@ -107,8 +107,8 @@ export function MarketWatchPage() {
                     const action = rec.action || "HOLD";
                     const actionColor = action === "BUY" ? "success" : action === "HOLD" ? "secondary" : "warning";
                     return (
-                      <TableRow key={rec.symbol || idx}>
-                        <TableCell className="font-medium">{rec.symbol || String(rec.stockId) || "-"}</TableCell>
+                      <TableRow key={rec.id || idx}>
+                        <TableCell className="font-medium">{rec.symbol || "-"}</TableCell>
                         <TableCell>
                           {rec.confidenceScore !== undefined ? (
                             <Badge variant={badgeVariant}>{(confidence * 100).toFixed(2)}%</Badge>

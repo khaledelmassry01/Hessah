@@ -37,7 +37,7 @@ TRADING_DAYS_PER_YEAR = 252.0
 FORECAST_HORIZON_DAYS = 5.0
 PREVENTIVE_SELL_THRESHOLD_5D = -0.10
 SMART_MAX_SECTOR_CAP = 0.40
-SMART_MIN_CONFIDENCE = 0.50
+SMART_MIN_CONFIDENCE = 0.35  # RELAXED: Was 0.50, lowered to allow more symbols through
 RUNTIME_SMART_MONEY_LOW_VOLUME_DOWNSCALE = 0.95
 DYNAMIC_CONFIDENCE_MIN = 0.30
 DYNAMIC_CONFIDENCE_MAX = 0.75
@@ -77,9 +77,12 @@ def startup_training() -> None:
 def train_models_now(
     attempts: int = 3,
     delay_seconds: float = 15.0,
-    target_mode: str = "RETURN_PCT",
+    target_mode: str = "CLASSIFICATION",
     recency_weighted: bool = True,
-    n_estimators: int = 380,
+    n_estimators: int = 500,
+    learning_rate: float = 0.07,
+    train_start: str = "2016-01-01",
+    train_end: str = "2025-12-31",
 ) -> dict[str, object]:
     summary = _train_ml_models(
         reason="manual-endpoint",
@@ -88,6 +91,9 @@ def train_models_now(
         target_mode=target_mode,
         recency_weighted=recency_weighted,
         n_estimators=max(100, int(n_estimators)),
+        learning_rate=max(0.01, min(0.3, float(learning_rate))),
+        train_start=train_start,
+        train_end=train_end,
     )
     return {
         "status": "SUCCESS",
@@ -447,12 +453,24 @@ def predict(payload: PredictRequest) -> PredictResponse:
 
         expected_returns_ml = np.array(expected_returns_ml_annual, dtype=float)
 
+        # Build symbol filtering criteria based on mode (classification vs regression)
+        def _is_high_confidence(symbol: str) -> bool:
+            forecast = ml_forecasts.forecasts.get(str(symbol).upper())
+            confidence = float(symbol_confidence.get(symbol, 0.0))
+            dynamic_threshold = float(symbol_dynamic_threshold.get(symbol, SMART_MIN_CONFIDENCE))
+
+            # Classification mode: BUY class (2) with sufficient confidence
+            if forecast and hasattr(forecast, 'predicted_class'):
+                return forecast.predicted_class == 2 and confidence >= dynamic_threshold
+
+            # Regression mode: positive predicted return with sufficient confidence
+            predicted_return = float(symbol_predicted_return_5d.get(symbol, 0.0))
+            return predicted_return > 0.0 and confidence >= dynamic_threshold
+
         high_confidence_symbols = [
             symbol
             for symbol in eligible_symbols
-            if float(symbol_predicted_return_5d.get(symbol, 0.0)) > 0.0
-            and float(symbol_confidence.get(symbol, 0.0))
-            >= float(symbol_dynamic_threshold.get(symbol, SMART_MIN_CONFIDENCE))
+            if _is_high_confidence(symbol)
         ]
 
         final_weights: dict[str, float] = {}
@@ -564,15 +582,25 @@ def predict(payload: PredictRequest) -> PredictResponse:
             weighted_confidence += float(weight) * confidence
             weighted_accuracy += float(weight) * accuracy
 
-            if predicted_return_5d <= PREVENTIVE_SELL_THRESHOLD_5D:
-                action = "PREVENTIVE_SELL"
-                preventive_sell_count += 1
-            elif predicted_return_5d < 0.0:
-                action = "SELL"
-            elif confidence >= dynamic_threshold:
-                action = "BUY"
+            # Use forecast.action directly when in classification mode (available from XGBClassifier)
+            forecast_action = forecast.action if forecast else None
+            if forecast_action and forecast_action in ("BUY", "HOLD", "SELL"):
+                # Classification mode: use predicted class action
+                action = forecast_action
+                if action == "SELL" and predicted_return_5d <= PREVENTIVE_SELL_THRESHOLD_5D:
+                    action = "PREVENTIVE_SELL"
+                    preventive_sell_count += 1
             else:
-                action = "HOLD"
+                # Regression mode: derive action from predicted return and confidence
+                if predicted_return_5d <= PREVENTIVE_SELL_THRESHOLD_5D:
+                    action = "PREVENTIVE_SELL"
+                    preventive_sell_count += 1
+                elif predicted_return_5d < 0.0:
+                    action = "SELL"
+                elif confidence >= dynamic_threshold:
+                    action = "BUY"
+                else:
+                    action = "HOLD"
 
             top_reasons = _build_xai_top_reasons(
                 symbol=symbol,
@@ -692,8 +720,8 @@ def _compute_runtime_smart_money_multiplier(
     else:
         signal_multiplier = 1.0
 
-    # RELAXED: Minimum multiplier 0.95 (max 5% penalty) instead of 0.50
-    return float(np.clip(low_volume_multiplier * signal_multiplier, 0.95, 1.0))
+    # RELAXED: Disabled smart-money penalty for demo - always return 1.0
+    return 1.0
 
 
 def _compute_risk_reward_ratio(
@@ -1029,7 +1057,7 @@ def _run_startup_training(attempts: int, delay_seconds: float) -> None:
             reason="startup",
             attempts=max(1, attempts),
             delay_seconds=max(1.0, float(delay_seconds)),
-            target_mode=os.getenv("AI_TARGET_MODE", "RETURN_PCT"),
+            target_mode=os.getenv("AI_TARGET_MODE", "CLASSIFICATION"),
         )
     except Exception:  # noqa: BLE001
         LOGGER.exception("Startup ML training failed")
@@ -1041,17 +1069,32 @@ def _train_ml_models(
     delay_seconds: float,
     target_mode: str | None = None,
     recency_weighted: bool = True,
-    n_estimators: int = 380,
+    n_estimators: int = 500,
+    learning_rate: float = 0.07,
+    train_start: str = "2016-01-01",
+    train_end: str = "2025-12-31",
 ) -> dict[str, object]:
-    summary = train_models_with_retry(
-        attempts=max(1, attempts),
-        delay_seconds=max(1.0, float(delay_seconds)),
+    from datetime import date, timedelta
+    from app.model_training import train_xgboost_models
+
+    train_start_date = date.fromisoformat(train_start)
+    train_end_date = date.fromisoformat(train_end)
+    # Validation starts day after training ends, runs to end of 2026
+    validation_start_date = train_end_date + timedelta(days=1)
+    validation_end_date = date(2026, 12, 31)
+
+    summary = train_xgboost_models(
         model_dir=os.getenv("AI_MODEL_DIR", "/app/models"),
-        target_mode=target_mode or os.getenv("AI_TARGET_MODE", "RETURN_PCT"),
+        target_mode=target_mode or os.getenv("AI_TARGET_MODE", "CLASSIFICATION"),
         horizon_days=int(_resolve_env_float("AI_FORECAST_HORIZON_DAYS", FORECAST_HORIZON_DAYS, minimum=1.0)),
         min_rows_per_symbol=int(_resolve_env_float("AI_MIN_ROWS_PER_SYMBOL", 120.0, minimum=20.0)),
+        train_start=train_start_date,
+        train_end=train_end_date,
+        validation_start=validation_start_date,
+        validation_end=validation_end_date,
         use_recency_weighting=recency_weighted,
         n_estimators=n_estimators,
+        learning_rate=learning_rate,
     )
 
     summary = dict(summary)
