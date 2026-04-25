@@ -49,6 +49,17 @@ public class AllocationService {
             BigDecimal investableBudget,
             List<PortfolioTarget> targets
     ) {
+        return allocate(userId, portfolioRunId, investableBudget, targets, true);
+    }
+
+    @Transactional
+    public AllocationResult allocate(
+            Long userId,
+            Long portfolioRunId,
+            BigDecimal investableBudget,
+            List<PortfolioTarget> targets,
+            boolean executeTrades
+    ) {
         BigDecimal normalizedInvestable = money(investableBudget);
         BigDecimal executedTotal = ZERO_MONEY;
         LocalDate settlementDate = addBusinessDays(LocalDate.now(), 2);
@@ -99,7 +110,10 @@ public class AllocationService {
             residualTotal = ZERO_MONEY;
         }
 
-        BigDecimal creditedResidual = walletService.creditResidual(userId, residualTotal, portfolioRunId);
+        BigDecimal creditedResidual = BigDecimal.ZERO.setScale(CURRENCY_SCALE, RoundingMode.HALF_DOWN);
+        if (executeTrades) {
+            creditedResidual = walletService.creditResidual(userId, residualTotal, portfolioRunId);
+        }
         return new AllocationResult(savedExecutions, creditedResidual);
     }
 

@@ -51,8 +51,20 @@ public class PortfolioService {
     private static final String EGX_SUFFIX = ".CA";
     private static final String DEFAULT_SECTOR_CODE = "FIN_SERV";
     private static final BigDecimal FEE_MULTIPLIER = new BigDecimal("0.995");
-    private static final BigDecimal SMART_MAX_SECTOR_WEIGHT = new BigDecimal("0.30");
     private static final BigDecimal SMART_MIN_CONFIDENCE_THRESHOLD = new BigDecimal("0.55");
+
+    // Risk-based max sector weights (P1-01 fix)
+    private static final BigDecimal MAX_SECTOR_WEIGHT_LOW = new BigDecimal("0.20");
+    private static final BigDecimal MAX_SECTOR_WEIGHT_MEDIUM = new BigDecimal("0.30");
+    private static final BigDecimal MAX_SECTOR_WEIGHT_HIGH = new BigDecimal("0.40");
+
+    // Risk-based stop-loss / take-profit percentages (P1-04 fix)
+    private static final BigDecimal SL_LOW = new BigDecimal("0.030");   // 3%
+    private static final BigDecimal TP_LOW = new BigDecimal("0.060");   // 6%
+    private static final BigDecimal SL_MEDIUM = new BigDecimal("0.050"); // 5%
+    private static final BigDecimal TP_MEDIUM = new BigDecimal("0.100"); // 10%
+    private static final BigDecimal SL_HIGH = new BigDecimal("0.080");   // 8%
+    private static final BigDecimal TP_HIGH = new BigDecimal("0.150");   // 15%
 
     private final WalletService walletService;
     private final SubscriptionRepository subscriptionRepository;
@@ -159,9 +171,14 @@ public class PortfolioService {
                 throw new AiIntegrationException("AI engine returned FAILED status for request " + portfolioRun.getRequestUuid());
             }
 
+            BigDecimal maxSectorWeight = switch (riskLevel) {
+                case LOW -> MAX_SECTOR_WEIGHT_LOW;
+                case MEDIUM -> MAX_SECTOR_WEIGHT_MEDIUM;
+                case HIGH -> MAX_SECTOR_WEIGHT_HIGH;
+            };
             PortfolioOptimizer.OptimizationResult optimizationResult = portfolioOptimizer.optimize(
                     aiResponse.getAllocations(),
-                    SMART_MAX_SECTOR_WEIGHT,
+                    maxSectorWeight,
                     SMART_MIN_CONFIDENCE_THRESHOLD
             );
             aiResponse.setAllocations(optimizationResult.allocations());
@@ -178,7 +195,8 @@ public class PortfolioService {
                     userId,
                     portfolioRun.getId(),
                     fee.investableBudget(),
-                    targets
+                    targets,
+                    !usingVirtualTestingBalance
             );
 
             List<TradeOrder> orders = orderService.createPendingOrdersFromAllocations(
@@ -215,8 +233,10 @@ public class PortfolioService {
                         rule.setUserId(userId);
                         rule.setStockId(exec.getStockId());
                         rule.setPortfolioRunId(portfolioRun.getId());
-                        rule.setStopLossPct(new BigDecimal("0.050"));
-                        rule.setTakeProfitPct(new BigDecimal("0.100"));
+                        // Dynamic SL/TP based on risk level (P1-04 fix)
+                        BigDecimal[] slTp = resolveStopLossTakeProfit(riskLevel);
+                        rule.setStopLossPct(slTp[0]);
+                        rule.setTakeProfitPct(slTp[1]);
                         rule.setIsActive(true);
                         rule.setCreatedAt(LocalDateTime.now());
                         rule.setUpdatedAt(LocalDateTime.now());
@@ -282,9 +302,9 @@ public class PortfolioService {
     private AiConstraintsPayload buildConstraints(RiskLevel riskLevel) {
         AiConstraintsPayload constraints = new AiConstraintsPayload();
         constraints.setMaxSectorWeight(switch (riskLevel) {
-            case LOW -> SMART_MAX_SECTOR_WEIGHT;
-            case MEDIUM -> SMART_MAX_SECTOR_WEIGHT;
-            case HIGH -> SMART_MAX_SECTOR_WEIGHT;
+            case LOW -> MAX_SECTOR_WEIGHT_LOW;
+            case MEDIUM -> MAX_SECTOR_WEIGHT_MEDIUM;
+            case HIGH -> MAX_SECTOR_WEIGHT_HIGH;
         });
         constraints.setMaxAdv30Participation(new BigDecimal("0.05"));
         constraints.setExcludeSuspended(true);
@@ -464,5 +484,19 @@ public class PortfolioService {
             List<TradeOrder> orders,
             BigDecimal residualReturned
     ) {
+    }
+
+    /**
+     * Resolves stop-loss and take-profit percentages based on risk level.
+     * LOW risk: 3% SL / 6% TP
+     * MEDIUM risk: 5% SL / 10% TP
+     * HIGH risk: 8% SL / 15% TP
+     */
+    private BigDecimal[] resolveStopLossTakeProfit(RiskLevel riskLevel) {
+        return switch (riskLevel) {
+            case LOW -> new BigDecimal[]{SL_LOW, TP_LOW};
+            case MEDIUM -> new BigDecimal[]{SL_MEDIUM, TP_MEDIUM};
+            case HIGH -> new BigDecimal[]{SL_HIGH, TP_HIGH};
+        };
     }
 }

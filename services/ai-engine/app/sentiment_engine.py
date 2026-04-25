@@ -14,10 +14,8 @@ import pandas as pd
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SENTIMENT_CACHE = Path(__file__).resolve().parent / "data" / "sp500_cache.csv"
-SP500_STOOQ_URLS = [
-    "https://stooq.com/q/d/l/?s=%5Espx&i=d",
-    "https://stooq.com/q/d/l/?s=spy.us&i=d",
-]
+STOOQ_API_KEY = "gBZC9gxVWkS8T1enmvDRPJu04f2tqiwh"
+SP500_STOOQ_BASE_URL = "https://stooq.com/q/d/l/?s=^spx&i=d&apikey={apikey}&f={start}&t={end}"
 
 
 def _safe_series(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -45,30 +43,34 @@ def _read_sp500_cache(path: Path) -> pd.DataFrame:
     return cache.sort_values("trade_date").reset_index(drop=True)
 
 
-def _download_sp500_prices() -> pd.DataFrame:
-    for url in SP500_STOOQ_URLS:
-        try:
-            with urlopen(url, timeout=8) as response:  # noqa: S310
-                raw_text = response.read().decode("utf-8", errors="ignore")
-        except (TimeoutError, URLError, OSError) as exc:
-            LOGGER.warning("S&P500 download failed for %s: %s", url, exc)
-            continue
+def _download_sp500_prices(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
+    start_str = start_date.strftime("%Y%m%d")
+    end_str = end_date.strftime("%Y%m%d")
+    url = SP500_STOOQ_BASE_URL.format(
+        apikey=STOOQ_API_KEY,
+        start=start_str,
+        end=end_str
+    )
 
-        try:
-            frame = pd.read_csv(io.StringIO(raw_text))
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to parse S&P500 data from %s: %s", url, exc)
-            continue
+    try:
+        LOGGER.info("Fetching S&P500 data from Stooq: %s", url.replace(STOOQ_API_KEY, "REDACTED"))
+        # Using pandas directly as requested for CSV reading
+        frame = pd.read_csv(url)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("S&P500 download failed from Stooq: %s", exc)
+        return pd.DataFrame(columns=["trade_date", "close_price"])
 
-        if frame.empty or "Date" not in frame.columns or "Close" not in frame.columns:
-            continue
+    if frame.empty or "Date" not in frame.columns or "Close" not in frame.columns:
+        LOGGER.warning("Stooq returned empty or invalid S&P500 data")
+        return pd.DataFrame(columns=["trade_date", "close_price"])
 
-        frame = frame.rename(columns={"Date": "trade_date", "Close": "close_price"})
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-        frame["close_price"] = pd.to_numeric(frame["close_price"], errors="coerce")
-        frame = frame.dropna(subset=["trade_date", "close_price"]).sort_values("trade_date")
-        if not frame.empty:
-            return frame[["trade_date", "close_price"]].reset_index(drop=True)
+    frame = frame.rename(columns={"Date": "trade_date", "Close": "close_price"})
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    frame["close_price"] = pd.to_numeric(frame["close_price"], errors="coerce")
+    frame = frame.dropna(subset=["trade_date", "close_price"]).sort_values("trade_date")
+    
+    if not frame.empty:
+        return frame[["trade_date", "close_price"]].reset_index(drop=True)
 
     return pd.DataFrame(columns=["trade_date", "close_price"])
 
@@ -83,7 +85,7 @@ def _load_sp500_returns(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.
         if min_date <= start_date and max_date >= end_date:
             return cache
 
-    downloaded_prices = _download_sp500_prices()
+    downloaded_prices = _download_sp500_prices(start_date, end_date)
     if downloaded_prices.empty:
         return cache
 

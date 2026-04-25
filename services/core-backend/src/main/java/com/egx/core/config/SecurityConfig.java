@@ -1,11 +1,13 @@
 package com.egx.core.config;
 
+import java.util.Arrays;
 import java.util.List;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -27,24 +29,35 @@ import com.egx.core.security.SecurityRateLimitingFilter;
 @EnableWebSecurity
 public class SecurityConfig {
 
-    private final boolean requireAuth;
     private final boolean forceHttps;
     private final JwtAuthFilter jwtAuthFilter;
     private final AuthRateLimitFilter authRateLimitFilter;
     private final SecurityRateLimitingFilter securityRateLimitingFilter;
+    private final Environment environment;
 
     public SecurityConfig(
-            @Value("${app.security.require-auth:true}") boolean requireAuth,
             @Value("${app.security.force-https:false}") boolean forceHttps,
             JwtAuthFilter jwtAuthFilter,
             AuthRateLimitFilter authRateLimitFilter,
-            SecurityRateLimitingFilter securityRateLimitingFilter
+            SecurityRateLimitingFilter securityRateLimitingFilter,
+            Environment environment
     ) {
-        this.requireAuth = requireAuth;
         this.forceHttps = forceHttps;
         this.jwtAuthFilter = jwtAuthFilter;
         this.authRateLimitFilter = authRateLimitFilter;
         this.securityRateLimitingFilter = securityRateLimitingFilter;
+        this.environment = environment;
+    }
+
+    /**
+     * Determines if authentication is required based on active Spring profile.
+     * Auth bypass is STRICTLY limited to 'dev' profile only.
+     * Production environments MUST enforce JWT authentication.
+     */
+    private boolean isAuthRequired() {
+        List<String> activeProfiles = Arrays.asList(environment.getActiveProfiles());
+        // Only allow auth bypass in dev profile
+        return !activeProfiles.contains("dev");
     }
 
     @Bean
@@ -107,9 +120,10 @@ public class SecurityConfig {
                     // Protect all gateway-routed core APIs.
                     auth.requestMatchers("/api/core/**").authenticated();
 
-                    if (requireAuth) {
+                    if (isAuthRequired()) {
                         auth.anyRequest().authenticated();
                     } else {
+                        // Dev profile only: allow all requests for local testing
                         auth.anyRequest().permitAll();
                     }
                 })

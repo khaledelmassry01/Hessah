@@ -16,7 +16,7 @@ from .sentiment_engine import append_market_sentiment_features
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_DB_HOST = "mysql-db"
-DEFAULT_DB_PORT = 3307
+DEFAULT_DB_PORT = 3306
 DEFAULT_DB_NAME = "egx_portfolio"
 DEFAULT_DB_USER = "egx_app_user"
 DEFAULT_DB_PASSWORD = "EGX_App_7wN!9Qx2#M4Lz8"
@@ -174,7 +174,7 @@ def load_market_context_data(
             # Also fetch alternative data on port 3307
             alt_conn = open_mysql_connection(settings=MysqlSettings(
                 host=settings.host if settings else DEFAULT_DB_HOST,
-                port=3307,
+                port=3306,
                 user=settings.user if settings else DEFAULT_DB_USER,
                 password=settings.password if settings else DEFAULT_DB_PASSWORD,
                 database=settings.database if settings else DEFAULT_DB_NAME
@@ -346,9 +346,13 @@ def add_technical_indicators(raw_frame: pd.DataFrame) -> pd.DataFrame:
 
         volume_float = local["volume"].astype(float)
         local["volume_60d_avg"] = volume_float.rolling(window=60, min_periods=20).mean()
-        safe_volume_avg = local["volume_60d_avg"].replace(0.0, np.nan)
-        local["relative_volume_60d"] = (volume_float / safe_volume_avg).replace([np.inf, -np.inf], np.nan)
+        local["volume_20d_avg"] = volume_float.rolling(window=20, min_periods=5).mean()
+        safe_volume_avg_60 = local["volume_60d_avg"].replace(0.0, np.nan)
+        safe_volume_avg_20 = local["volume_20d_avg"].replace(0.0, np.nan)
+        local["relative_volume_60d"] = (volume_float / safe_volume_avg_60).replace([np.inf, -np.inf], np.nan)
         local["relative_volume_60d"] = local["relative_volume_60d"].fillna(1.0)
+        local["volume_shock_20d"] = (volume_float / safe_volume_avg_20).replace([np.inf, -np.inf], np.nan)
+        local["volume_shock_20d"] = local["volume_shock_20d"].fillna(1.0)
 
         # Keep per-symbol continuity with forward fill before dropping rows.
         local = local.ffill()

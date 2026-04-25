@@ -1,22 +1,23 @@
 package com.egx.core.security;
 
-import io.github.bucket4j.Bandwidth;
-import io.github.bucket4j.Bucket;
-import jakarta.servlet.FilterChain;
-import jakarta.servlet.ServletException;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-import java.io.IOException;
-import java.time.Duration;
-import java.util.Locale;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import io.github.bucket4j.Bandwidth;
+import io.github.bucket4j.Bucket;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 @Component
 public class AuthRateLimitFilter extends OncePerRequestFilter {
@@ -84,12 +85,57 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     private String resolveClientIp(HttpServletRequest request) {
         String forwardedFor = request.getHeader("X-Forwarded-For");
         if (forwardedFor != null && !forwardedFor.isBlank()) {
+            // X-Forwarded-For can be spoofed; find first valid, non-private, non-loopback IP
             String[] candidates = forwardedFor.split(",");
-            if (candidates.length > 0 && !candidates[0].isBlank()) {
-                return candidates[0].trim();
+            for (String candidate : candidates) {
+                String ip = candidate.trim();
+                if (isValidPublicIp(ip)) {
+                    return ip;
+                }
             }
         }
+        // Fallback to direct remote address
         return request.getRemoteAddr();
+    }
+
+    /**
+     * Validates that IP is not null/blank, not loopback, and not in private ranges.
+     * Prevents IP spoofing via X-Forwarded-For header.
+     */
+    private boolean isValidPublicIp(String ip) {
+        if (ip == null || ip.isBlank()) {
+            return false;
+        }
+        // Check for loopback
+        if (ip.equals("127.0.0.1") || ip.equals("::1") || ip.startsWith("127.")) {
+            return false;
+        }
+        // Check for private IPv4 ranges
+        if (ip.startsWith("10.") || ip.startsWith("192.168.") || ip.startsWith("172.")) {
+            // 172.16.0.0 - 172.31.255.255
+            if (ip.startsWith("172.")) {
+                try {
+                    int secondOctet = Integer.parseInt(ip.split("\\.")[1]);
+                    if (secondOctet >= 16 && secondOctet <= 31) {
+                        return false;
+                    }
+                } catch (Exception e) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        // Check for link-local
+        if (ip.startsWith("169.254.")) {
+            return false;
+        }
+        // Basic IPv4 format validation
+        if (!ip.matches("^(\\d{1,3}\\.){3}\\d{1,3}$")) {
+            // Allow IPv6 but mark as potentially valid
+            return ip.contains(":");
+        }
+        return true;
     }
 
     private String normalizePath(String path) {

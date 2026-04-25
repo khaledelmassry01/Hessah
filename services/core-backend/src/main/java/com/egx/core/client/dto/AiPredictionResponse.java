@@ -40,6 +40,9 @@ public class AiPredictionResponse {
     @JsonProperty("warnings")
     private List<String> warnings = new ArrayList<>();
 
+    @JsonProperty("rejected_symbols")
+    private List<AiRejectedSymbolItem> rejectedSymbols = new ArrayList<>();
+
     public String getRequestId() {
         return requestId;
     }
@@ -126,5 +129,13 @@ public class AiPredictionResponse {
 
     public void setWarnings(List<String> warnings) {
         this.warnings = warnings;
+    }
+
+    public List<AiRejectedSymbolItem> getRejectedSymbols() {
+        return rejectedSymbols;
+    }
+
+    public void setRejectedSymbols(List<AiRejectedSymbolItem> rejectedSymbols) {
+        this.rejectedSymbols = rejectedSymbols;
     }
 }
