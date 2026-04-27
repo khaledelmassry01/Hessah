@@ -63,6 +63,15 @@ def _ensure_daily_ai_signals_table(connection) -> None:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """
         )
+
+        # Backward-compatible migration: older tables may not have predicted_return_5d.
+        cursor.execute("SHOW COLUMNS FROM daily_ai_signals LIKE 'predicted_return_5d'")
+        has_predicted_return_column = cursor.fetchone() is not None
+        if not has_predicted_return_column:
+            cursor.execute(
+                "ALTER TABLE daily_ai_signals ADD COLUMN predicted_return_5d DECIMAL(10,6) NULL AFTER confidence_score"
+            )
+
         connection.commit()
     finally:
         cursor.close()

@@ -546,38 +546,21 @@ def train_xgboost_models(
 
         else:
             # Regression Mode (original logic)
-            try:
-                model = XGBRegressor(
-                    objective="reg:squarederror",
-                    n_estimators=resolved_n_estimators,
-                    learning_rate=resolved_learning_rate,
-                    max_depth=4,
-                    min_child_weight=2,
-                    subsample=0.90,
-                    colsample_bytree=0.90,
-                    reg_lambda=1.0,
-                    random_state=42,
-                    n_jobs=2,
-                    tree_method="hist",
-                    device="cuda",
-                )
-                model.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=train_sample_weight)
-            except xgb.core.XGBoostError:
-                LOGGER.warning("GPU not available for regression model, falling back to CPU")
-                model = XGBRegressor(
-                    objective="reg:squarederror",
-                    n_estimators=resolved_n_estimators,
-                    learning_rate=resolved_learning_rate,
-                    max_depth=4,
-                    min_child_weight=2,
-                    subsample=0.90,
-                    colsample_bytree=0.90,
-                    reg_lambda=1.0,
-                    random_state=42,
-                    n_jobs=2,
-                    device="cpu",
-                )
-                model.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=train_sample_weight)
+            model = XGBRegressor(
+                objective="reg:squarederror",
+                n_estimators=resolved_n_estimators,
+                learning_rate=resolved_learning_rate,
+                max_depth=4,
+                min_child_weight=2,
+                subsample=0.90,
+                colsample_bytree=0.90,
+                reg_lambda=1.0,
+                random_state=42,
+                n_jobs=2,
+                tree_method="hist",
+                device="cpu",
+            )
+            model.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=train_sample_weight)
 
             y_true = y_val.to_numpy(dtype=float)
             y_pred = model.predict(x_val.to_numpy()).astype(float)
@@ -662,44 +645,27 @@ def train_xgboost_models(
                 "fitRows": int(len(fit_slice)),
             }
         else:
-            try:
-                final_model = XGBRegressor(
-                    objective="reg:squarederror",
-                    n_estimators=resolved_n_estimators,
-                    learning_rate=resolved_learning_rate,
-                    max_depth=4,
-                    min_child_weight=2,
-                    subsample=0.90,
-                    colsample_bytree=0.90,
-                    reg_lambda=1.0,
-                    random_state=42,
-                    n_jobs=2,
-                    tree_method="hist",
-                    device="cuda",
-                )
-                final_model.fit(x_fit.to_numpy(), y_fit.to_numpy(), sample_weight=fit_sample_weight)
-            except xgb.core.XGBoostError:
-                LOGGER.warning("GPU not available for final regression model, falling back to CPU")
-                final_model = XGBRegressor(
-                    objective="reg:squarederror",
-                    n_estimators=resolved_n_estimators,
-                    learning_rate=resolved_learning_rate,
-                    max_depth=4,
-                    min_child_weight=2,
-                    subsample=0.90,
-                    colsample_bytree=0.90,
-                    reg_lambda=1.0,
-                    random_state=42,
-                    n_jobs=2,
-                    device="cpu",
-                )
-                final_model.fit(x_fit.to_numpy(), y_fit.to_numpy(), sample_weight=fit_sample_weight)
+            final_model = XGBRegressor(
+                objective="reg:squarederror",
+                n_estimators=resolved_n_estimators,
+                learning_rate=resolved_learning_rate,
+                max_depth=4,
+                min_child_weight=2,
+                subsample=0.90,
+                colsample_bytree=0.90,
+                reg_lambda=1.0,
+                random_state=42,
+                n_jobs=2,
+                tree_method="hist",
+                device="cpu",
+            )
+            final_model.fit(x_fit.to_numpy(), y_fit.to_numpy(), sample_weight=fit_sample_weight)
 
             metrics_dict = {
                 "rmse": rmse,
                 "mae": mae,
                 "r2": r2,
-                "accuracyScore": accuracy_score,
+                "accuracyScore": accuracy_score_val,
                 "trainRows": train_rows,
                 "validationRows": validation_rows,
                 "fitRows": int(len(fit_slice)),

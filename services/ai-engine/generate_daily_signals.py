@@ -131,6 +131,9 @@ def load_models_from_disk(model_dir: Path) -> tuple[dict[str, Any], list[str], d
 
 def fetch_latest_market_data_from_db(symbols: list[str], as_of_date: date) -> pd.DataFrame:
     """Fetch historical market data from database for feature engineering."""
+    if not symbols:
+        return pd.DataFrame()
+
     conn = mysql.connector.connect(
         host=os.environ["DB_HOST"],
         port=int(os.environ["DB_PORT"]),
@@ -140,35 +143,57 @@ def fetch_latest_market_data_from_db(symbols: list[str], as_of_date: date) -> pd
     )
     
     try:
-        # Get symbol to stock_id mapping
-        symbol_list = "', '".join(symbols)
-        query = f"""
-        SELECT id, symbol, sector_code 
-        FROM stock_instruments 
-        WHERE symbol IN ('{symbol_list}')
-        """
-        instruments = pd.read_sql(query, conn)
-        symbol_to_id = dict(zip(instruments["symbol"], instruments["id"]))
+        cursor = conn.cursor(dictionary=True)
+        try:
+            # Get symbol to stock_id mapping
+            symbol_placeholders = ", ".join(["%s"] * len(symbols))
+            cursor.execute(
+                f"""
+                SELECT id, symbol
+                FROM stock_instruments
+                WHERE symbol IN ({symbol_placeholders})
+                """,
+                symbols,
+            )
+            instrument_rows = cursor.fetchall()
+            instruments = pd.DataFrame(instrument_rows)
+
+            if instruments.empty:
+                return pd.DataFrame()
+
+            symbol_to_id = dict(zip(instruments["symbol"], instruments["id"]))
         
-        # Fetch market data for last 252 days
-        start_date = as_of_date - timedelta(days=366)
-        stock_ids = ", ".join([str(sid) for sid in symbol_to_id.values()])
+            # Fetch market data for last 252 days
+            start_date = as_of_date - timedelta(days=366)
+            stock_ids = list(symbol_to_id.values())
+            if not stock_ids:
+                return pd.DataFrame()
+
+            stock_placeholders = ", ".join(["%s"] * len(stock_ids))
+            cursor.execute(
+                f"""
+                SELECT
+                    stock_id,
+                    trade_date,
+                    open_price,
+                    high_price,
+                    low_price,
+                    close_price,
+                    volume
+                FROM market_daily_bars
+                WHERE stock_id IN ({stock_placeholders})
+                  AND trade_date BETWEEN %s AND %s
+                ORDER BY stock_id, trade_date
+                """,
+                [*stock_ids, start_date, as_of_date],
+            )
+            market_rows = cursor.fetchall()
+        finally:
+            cursor.close()
         
-        query = f"""
-        SELECT 
-            stock_id,
-            trade_date,
-            open_price,
-            high_price,
-            low_price,
-            close_price,
-            volume
-        FROM market_daily_bars 
-        WHERE stock_id IN ({stock_ids})
-          AND trade_date BETWEEN '{start_date}' AND '{as_of_date}'
-        ORDER BY stock_id, trade_date
-        """
-        df = pd.read_sql(query, conn)
+        df = pd.DataFrame(market_rows)
+        if df.empty:
+            return df
         
         # Join back with symbols
         id_to_symbol = {v: k for k, v in symbol_to_id.items()}
