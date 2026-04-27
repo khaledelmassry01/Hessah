@@ -19,7 +19,7 @@ DEFAULT_DELAY_SECONDS = 0.25
 DEFAULT_OUTPUT_DIR = Path("/app/data/historical")
 MIN_EXPECTED_ROWS = 400
 EODHD_BASE_URL = "https://eodhd.com"
-EODHD_TOKEN_ENV_VAR = "69e67350a20f86.57807831"
+EODHD_TOKEN_ENV_VAR = "EODHD_API_TOKEN"
 EODHD_REQUEST_TIMEOUT_SECONDS = 30
 EODHD_MAX_RETRIES = 3
 EODHD_RETRY_DELAY_SECONDS = 1.0
@@ -85,6 +85,11 @@ def download_symbol_history(
     api_token: str,
 ) -> tuple[pd.DataFrame | None, str | None, str | None]:
     last_error: str | None = None
+
+    # If no API token provided, skip EODHD fetch entirely (system uses TradingView/DB)
+    if not api_token:
+        LOGGER.info("EODHD token not configured; skipping EODHD fetch for %s", canonical_symbol)
+        return None, None, "EODHD token not configured"
 
     for ticker in ticker_candidates(canonical_symbol):
         for attempt in range(1, EODHD_MAX_RETRIES + 1):
@@ -231,11 +236,7 @@ def _looks_like_unknown_symbol_error(raw_text: str) -> bool:
     )
 
 
-def write_symbol_csv(output_dir: Path, canonical_symbol: str, frame: pd.DataFrame) -> Path:
-    base_symbol = to_base_symbol(canonical_symbol) or canonical_symbol.replace(".CA", "")
-    target_file = output_dir / f"{base_symbol}.csv"
-    frame.to_csv(target_file, index=False)
-    return target_file
+
 
 
 def run_seeding(years: int, output_dir: Path, delay_seconds: float, if_empty: bool) -> int:
@@ -248,63 +249,18 @@ def run_seeding(years: int, output_dir: Path, delay_seconds: float, if_empty: bo
     if years < 1:
         raise ValueError("years must be >= 1")
 
-    symbols = list(EGX30_SYMBOL_TO_CANONICAL.values())
-    start_date = date.today() - timedelta(days=366 * years)
-    end_date = date.today()
-    api_token = os.getenv(EODHD_TOKEN_ENV_VAR, "").strip()
-    if not api_token:
-        raise ValueError(f"{EODHD_TOKEN_ENV_VAR} is not configured")
+    # New behavior: use the historical ingestion pipeline to fetch and POST data directly to core backend.
+    try:
+        from app.historical_ingestion import ingest_historical_market_data_to_core
 
-    session = build_session()
-
-    seeded = 0
-    failed = 0
-    total_rows = 0
-
-    for index, canonical in enumerate(symbols, start=1):
-        canonical_symbol = canonicalize_symbol(canonical)
-        if canonical_symbol is None:
-            LOGGER.warning("Skipping unmapped symbol: %s", canonical)
-            failed += 1
-            continue
-
-        LOGGER.info("[%s/%s] Seeding %s", index, len(symbols), canonical_symbol)
-        frame, ticker_used, warning = download_symbol_history(
-            canonical_symbol=canonical_symbol,
-            start_date=start_date,
-            end_date=end_date,
-            session=session,
-            api_token=api_token,
-        )
-
-        if frame is None or frame.empty:
-            failed += 1
-            LOGGER.warning("Failed to seed %s (%s)", canonical_symbol, warning or "no data")
-        else:
-            if len(frame.index) < MIN_EXPECTED_ROWS:
-                LOGGER.warning(
-                    "Seeded %s from %s with low row count (%s rows)",
-                    canonical_symbol,
-                    ticker_used,
-                    len(frame.index),
-                )
-            path = write_symbol_csv(output_dir, canonical_symbol, frame)
-            seeded += 1
-            total_rows += len(frame.index)
-            LOGGER.info("Saved %s rows for %s into %s", len(frame.index), canonical_symbol, path)
-
-        if index < len(symbols):
-            time.sleep(max(0.0, delay_seconds))
-
-    LOGGER.info(
-        "Seeder completed: seeded=%s failed=%s total_rows=%s directory=%s",
-        seeded,
-        failed,
-        total_rows,
-        output_dir,
-    )
-
-    return 0 if seeded > 0 else 1
+        LOGGER.info("Starting ingestion pipeline for %s years via core backend", years)
+        result = ingest_historical_market_data_to_core(years=years)
+        LOGGER.info("Ingestion result: %s", result)
+        status = str(result.get("status") or "FAILED").upper()
+        return 0 if status == "SUCCESS" else 1
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error("Historical ingestion pipeline failed: %s", exc)
+        return 1
 
 
 def main() -> int:

@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -25,7 +25,9 @@ from .feature_engineering import (
     FEATURE_COLUMNS,
     build_feature_dataset,
     build_latest_feature_rows,
-    load_historical_market_data,
+    MysqlSettings,
+    open_mysql_connection,
+    resolve_mysql_settings,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -112,10 +114,8 @@ def _get_optimized_xgboost_params(
         "learning_rate": [0.01, 0.05, 0.1],
     }
 
-    # Use fewer estimators for HPO to keep it fast
-    # Try GPU first, fallback to CPU if CUDA not available
-    try:
-        base_model = XGBClassifier(
+    def _build_base_model(device: str) -> XGBClassifier:
+        return XGBClassifier(
             objective="multi:softprob",
             num_class=3,
             eval_metric='mlogloss',
@@ -127,27 +127,12 @@ def _get_optimized_xgboost_params(
             random_state=42,
             n_jobs=2,
             tree_method="hist",
-            device="cuda",
-        )
-    except xgb.core.XGBoostError:
-        LOGGER.warning("GPU not available for HPO base model, falling back to CPU")
-        base_model = XGBClassifier(
-            objective="multi:softprob",
-            num_class=3,
-            eval_metric='mlogloss',
-            n_estimators=100,  # Minimal trees for HPO speed, prevents GPU OOM
-            min_child_weight=2,
-            subsample=0.90,
-            colsample_bytree=0.90,
-            reg_lambda=1.0,
-            random_state=42,
-            n_jobs=2,
-            device="cpu",
+            device=device,
         )
 
     try:
         search = RandomizedSearchCV(
-            estimator=base_model,
+            estimator=_build_base_model("cuda"),
             param_distributions=param_distributions,
             n_iter=n_iter,
             scoring='f1_macro',
@@ -157,7 +142,22 @@ def _get_optimized_xgboost_params(
             verbose=0,
         )
 
-        search.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=sample_weight)
+        try:
+            search.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=sample_weight)
+        except xgb.core.XGBoostError:
+            LOGGER.warning("GPU not detected, falling back to CPU.")
+            search = RandomizedSearchCV(
+                estimator=_build_base_model("cpu"),
+                param_distributions=param_distributions,
+                n_iter=n_iter,
+                scoring='f1_macro',
+                cv=cv_folds,
+                random_state=42,
+                n_jobs=1,
+                verbose=0,
+            )
+            search.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=sample_weight)
+
         best_params = search.best_params_
 
         LOGGER.debug(
@@ -286,6 +286,86 @@ def _build_recency_sample_weights(trade_dates: pd.Series) -> np.ndarray:
     return weights
 
 
+def _fit_xgb_with_gpu_fallback(
+    gpu_factory: Callable[[], Any],
+    cpu_factory: Callable[[], Any],
+    x_train: pd.DataFrame | np.ndarray,
+    y_train: pd.DataFrame | pd.Series | np.ndarray,
+    sample_weight: np.ndarray | None = None,
+) -> Any:
+    try:
+        model = gpu_factory()
+        model.fit(x_train, y_train, sample_weight=sample_weight)
+        return model
+    except xgb.core.XGBoostError:
+        LOGGER.warning("GPU not detected, falling back to CPU.")
+        model = cpu_factory()
+        model.fit(x_train, y_train, sample_weight=sample_weight)
+        return model
+
+
+def _load_training_data_from_mysql(
+    symbols: list[str] | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    settings: MysqlSettings | None = None,
+) -> pd.DataFrame:
+    resolved_settings = settings or resolve_mysql_settings()
+    start_value = start_date or DEFAULT_TRAIN_START
+    params: list[Any] = [start_value]
+
+    query = [
+        "SELECT",
+        "  UPPER(si.symbol) AS symbol,",
+        "  mdb.trade_date AS trade_date,",
+        "  COALESCE(mdb.open_price, mdb.close_price) AS open_price,",
+        "  COALESCE(mdb.high_price, mdb.close_price) AS high_price,",
+        "  COALESCE(mdb.low_price, mdb.close_price) AS low_price,",
+        "  mdb.close_price AS close_price,",
+        "  COALESCE(mdb.volume, 0) AS volume",
+        "FROM market_daily_bars mdb",
+        "JOIN stock_instruments si ON si.id = mdb.stock_id",
+        "WHERE mdb.trade_date >= %s",
+    ]
+
+    if end_date is not None:
+        query.append("  AND mdb.trade_date <= %s")
+        params.append(end_date)
+
+    if symbols:
+        normalized = [symbol.strip().upper() for symbol in symbols if symbol and symbol.strip()]
+        if normalized:
+            placeholders = ", ".join(["%s"] * len(normalized))
+            query.append(f"  AND UPPER(si.symbol) IN ({placeholders})")
+            params.extend(normalized)
+
+    query.append("ORDER BY symbol ASC, trade_date ASC")
+
+    connection = open_mysql_connection(resolved_settings)
+    try:
+        cursor = connection.cursor(dictionary=True)
+        try:
+            cursor.execute("\n".join(query), params)
+            rows = cursor.fetchall()
+            columns = cursor.column_names or []
+        finally:
+            cursor.close()
+    finally:
+        connection.close()
+
+    if not rows:
+        return pd.DataFrame(columns=list(columns))
+
+    frame = pd.DataFrame(rows)
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    for col in ["open_price", "high_price", "low_price", "close_price", "volume"]:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+
+    frame = frame.dropna(subset=["symbol", "trade_date", "close_price"])
+    frame = frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+    return frame
+
+
 def _estimate_tree_uncertainty_std(model: XGBRegressor, x_row: pd.DataFrame) -> float:
     try:
         booster = model.get_booster()
@@ -375,7 +455,7 @@ def train_xgboost_models(
     model_root = _resolve_model_dir(model_dir)
     model_root.mkdir(parents=True, exist_ok=True)
 
-    raw = load_historical_market_data(
+    raw = _load_training_data_from_mysql(
         symbols=symbols,
         start_date=train_start,
         end_date=validation_end,
@@ -393,113 +473,66 @@ def train_xgboost_models(
 
     for symbol, group in features.groupby("symbol"):
         ordered = group.sort_values("trade_date").copy()
-        train_mask = (ordered["trade_date"] >= pd.Timestamp(train_start)) & (ordered["trade_date"] <= pd.Timestamp(train_end))
-        val_mask = (ordered["trade_date"] >= pd.Timestamp(validation_start)) & (ordered["trade_date"] <= pd.Timestamp(validation_end))
 
-        train_rows = int(train_mask.sum())
-        validation_rows = int(val_mask.sum())
+        # Dynamic chronological 80/20 split per-symbol to avoid hardcoded date-window issues.
+        total_rows = int(len(ordered))
 
-        if train_rows < min_rows_per_symbol:
-            skipped_symbols[symbol] = f"Insufficient training rows: {train_rows}"
+        # Enforce minimum rows per symbol before splitting
+        if total_rows < min_rows_per_symbol:
+            skipped_symbols[symbol] = f"Insufficient total rows: {total_rows}"
             continue
+
+        split_idx = int(np.floor(total_rows * 0.8))
+        # Ensure at least one row reserved for validation (defensive)
+        split_idx = max(1, min(split_idx, total_rows - 1))
+
+        train_rows = int(split_idx)
+        validation_rows = int(total_rows - split_idx)
 
         if validation_rows < max(20, int(min_rows_per_symbol * 0.15)):
             skipped_symbols[symbol] = f"Insufficient validation rows: {validation_rows}"
             continue
 
-        x_train = ordered.loc[train_mask, FEATURE_COLUMNS].astype(float)
-        y_train = ordered.loc[train_mask, target_column].astype(float)
-        train_dates = ordered.loc[train_mask, "trade_date"]
+        # Slice chronologically: first 80% train, last 20% validation
+        x_train = ordered.iloc[:split_idx][FEATURE_COLUMNS].astype(float)
+        y_train = ordered.iloc[:split_idx][target_column].astype(float)
+        train_dates = ordered.iloc[:split_idx]["trade_date"]
 
-        x_val = ordered.loc[val_mask, FEATURE_COLUMNS].astype(float)
-        y_val = ordered.loc[val_mask, target_column].astype(float)
+        x_val = ordered.iloc[split_idx:][FEATURE_COLUMNS].astype(float)
+        y_val = ordered.iloc[split_idx:][target_column].astype(float)
 
         train_sample_weight = _build_recency_sample_weights(train_dates) if use_recency_weighting else None
 
-        # Classification Mode: Use XGBClassifier with StratifiedKFold
         if resolved_target_mode == "CLASSIFICATION":
-            # Convert targets to integers for classification
             y_train_int = y_train.round().astype(int).clip(0, 2)
             y_val_int = y_val.round().astype(int).clip(0, 2)
 
-            # Compute balanced sample weights to fix class imbalance
-            # This forces the model to treat BUY signals with equal importance to SELL signals
-            balanced_sample_weights = compute_sample_weight('balanced', y_train_int)
-
-            # Combine with recency weights if enabled
+            combined_weights = compute_sample_weight("balanced", y_train_int)
             if use_recency_weighting:
-                recency_weights = _build_recency_sample_weights(train_dates)
-                # Multiply balanced weights by recency weights
-                combined_weights = balanced_sample_weights * recency_weights
-            else:
-                combined_weights = balanced_sample_weights
-
-            # Lightweight HPO: Find optimal max_depth and learning_rate per stock
-            # Use balanced weights for HPO to ensure fair class representation
-            hpo_weights = compute_sample_weight('balanced', y_train_int)
-            if use_recency_weighting:
-                hpo_weights = hpo_weights * _build_recency_sample_weights(train_dates)
+                combined_weights = combined_weights * _build_recency_sample_weights(train_dates)
 
             optimized_params = _get_optimized_xgboost_params(
-                x_train, y_train_int, sample_weight=hpo_weights, n_iter=8, cv_folds=3
+                x_train=x_train,
+                y_train=y_train_int,
+                sample_weight=combined_weights,
+                n_iter=8,
+                cv_folds=3,
             )
             best_max_depth = int(optimized_params["max_depth"])
             best_learning_rate = float(optimized_params["learning_rate"])
 
             LOGGER.info(
                 "Symbol=%s HPO results: max_depth=%s learning_rate=%s",
-                symbol, best_max_depth, best_learning_rate,
+                symbol,
+                best_max_depth,
+                best_learning_rate,
             )
 
-            # Use StratifiedKFold for cross-validation with optimized params
-            skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-            cv_scores = []
-
-            for fold, (train_idx, val_idx) in enumerate(skf.split(x_train, y_train_int)):
-                x_fold_train, x_fold_val = x_train.iloc[train_idx], x_train.iloc[val_idx]
-                y_fold_train, y_fold_val = y_train_int.iloc[train_idx], y_train_int.iloc[val_idx]
-
-                fold_model = XGBClassifier(
+            model = _fit_xgb_with_gpu_fallback(
+                gpu_factory=lambda: XGBClassifier(
                     objective="multi:softprob",
                     num_class=3,
-                    eval_metric='mlogloss',
-                    n_estimators=max(50, resolved_n_estimators // 3),
-                    learning_rate=best_learning_rate,
-                    max_depth=best_max_depth,
-                    min_child_weight=2,
-                    subsample=0.90,
-                    colsample_bytree=0.90,
-                    reg_lambda=1.0,
-                    random_state=42 + fold,
-                    n_jobs=2,
-                    tree_method="hist",
-                    device="cuda",
-                )
-
-                fold_sample_weight = None
-                if use_recency_weighting:
-                    fold_dates = train_dates.iloc[train_idx]
-                    fold_sample_weight = _build_recency_sample_weights(fold_dates)
-
-                # Compute balanced weights for this fold
-                fold_balanced_weights = compute_sample_weight('balanced', y_fold_train)
-                if use_recency_weighting:
-                    fold_recency_weights = _build_recency_sample_weights(train_dates.iloc[train_idx])
-                    fold_combined_weights = fold_balanced_weights * fold_recency_weights
-                else:
-                    fold_combined_weights = fold_balanced_weights
-
-                fold_model.fit(x_fold_train.to_numpy(), y_fold_train.to_numpy(), sample_weight=fold_combined_weights)
-                fold_pred = fold_model.predict(x_fold_val.to_numpy())
-                fold_acc = sklearn.metrics.accuracy_score(y_fold_val, fold_pred)
-                cv_scores.append(fold_acc)
-
-            # Final model on full training data with optimized hyperparameters
-            try:
-                model = XGBClassifier(
-                    objective="multi:softprob",
-                    num_class=3,
-                    eval_metric='mlogloss',
+                    eval_metric="mlogloss",
                     n_estimators=resolved_n_estimators,
                     learning_rate=best_learning_rate,
                     max_depth=best_max_depth,
@@ -511,14 +544,11 @@ def train_xgboost_models(
                     n_jobs=2,
                     tree_method="hist",
                     device="cuda",
-                )
-                model.fit(x_train.to_numpy(), y_train_int.to_numpy(), sample_weight=combined_weights)
-            except xgb.core.XGBoostError:
-                LOGGER.warning("GPU not available for final model, falling back to CPU")
-                model = XGBClassifier(
+                ),
+                cpu_factory=lambda: XGBClassifier(
                     objective="multi:softprob",
                     num_class=3,
-                    eval_metric='mlogloss',
+                    eval_metric="mlogloss",
                     n_estimators=resolved_n_estimators,
                     learning_rate=best_learning_rate,
                     max_depth=best_max_depth,
@@ -528,78 +558,95 @@ def train_xgboost_models(
                     reg_lambda=1.0,
                     random_state=42,
                     n_jobs=2,
+                    tree_method="hist",
                     device="cpu",
-                )
-                model.fit(x_train.to_numpy(), y_train_int.to_numpy(), sample_weight=combined_weights)
+                ),
+                x_train=x_train.to_numpy(),
+                y_train=y_train_int.to_numpy(),
+                sample_weight=combined_weights,
+            )
 
-            # Validation predictions - get probabilities and predicted classes
             y_pred_proba = model.predict_proba(x_val.to_numpy())
             y_pred = np.argmax(y_pred_proba, axis=1)
-
-            # Compute classification metrics
             class_metrics = _compute_classification_metrics(y_val_int.to_numpy(), y_pred)
-
-            rmse = 0.0  # Not applicable for classification
-            mae = 0.0   # Not applicable for classification
-            r2 = 0.0    # Not applicable for classification
+            rmse = 0.0
+            mae = 0.0
+            r2 = 0.0
             accuracy_score_val = class_metrics["accuracy"]
-
         else:
-            # Regression Mode (original logic)
-            model = XGBRegressor(
-                objective="reg:squarederror",
-                n_estimators=resolved_n_estimators,
-                learning_rate=resolved_learning_rate,
-                max_depth=4,
-                min_child_weight=2,
-                subsample=0.90,
-                colsample_bytree=0.90,
-                reg_lambda=1.0,
-                random_state=42,
-                n_jobs=2,
-                tree_method="hist",
-                device="cpu",
+            model = _fit_xgb_with_gpu_fallback(
+                gpu_factory=lambda: XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=resolved_learning_rate,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    tree_method="hist",
+                    device="cuda",
+                ),
+                cpu_factory=lambda: XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=resolved_learning_rate,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    tree_method="hist",
+                    device="cpu",
+                ),
+                x_train=x_train.to_numpy(),
+                y_train=y_train.to_numpy(),
+                sample_weight=train_sample_weight,
             )
-            model.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=train_sample_weight)
 
             y_true = y_val.to_numpy(dtype=float)
             y_pred = model.predict(x_val.to_numpy()).astype(float)
-
             rmse = float(np.sqrt(_mse(y_true, y_pred)))
             mae = _mae(y_true, y_pred)
             r2 = _r2(y_true, y_pred)
             accuracy_score_val = _compute_accuracy_score(y_true, y_pred, resolved_target_mode)
             class_metrics = None
 
-        fit_mask = (ordered["trade_date"] >= pd.Timestamp(train_start)) & (ordered["trade_date"] <= pd.Timestamp(validation_end))
-        fit_slice = ordered.loc[fit_mask].copy()
+        # Final fit: use all available rows for the final model (chronological full-window)
+        fit_slice = ordered.copy()
+        if fit_slice.empty:
+            skipped_symbols[symbol] = "No rows available for final fit"
+            continue
+
         x_fit = fit_slice[FEATURE_COLUMNS].astype(float)
         y_fit = fit_slice[target_column].astype(float)
-        fit_sample_weight = (
-            _build_recency_sample_weights(fit_slice["trade_date"])
-            if use_recency_weighting
-            else None
-        )
+        fit_sample_weight = _build_recency_sample_weights(fit_slice["trade_date"]) if use_recency_weighting else None
 
-        # Final model training - Classification vs Regression
         if resolved_target_mode == "CLASSIFICATION":
             y_fit_int = y_fit.round().astype(int).clip(0, 2)
-            # Re-run lightweight HPO on full fit data for final model
-            fit_hpo_weights = compute_sample_weight('balanced', y_fit_int)
+            fit_hpo_weights = compute_sample_weight("balanced", y_fit_int)
             if use_recency_weighting:
                 fit_hpo_weights = fit_hpo_weights * _build_recency_sample_weights(fit_slice["trade_date"])
 
             final_optimized_params = _get_optimized_xgboost_params(
-                x_fit, y_fit_int, sample_weight=fit_hpo_weights, n_iter=6, cv_folds=3
+                x_train=x_fit,
+                y_train=y_fit_int,
+                sample_weight=fit_hpo_weights,
+                n_iter=6,
+                cv_folds=3,
             )
             final_max_depth = int(final_optimized_params["max_depth"])
             final_learning_rate = float(final_optimized_params["learning_rate"])
 
-            try:
-                final_model = XGBClassifier(
+            final_model = _fit_xgb_with_gpu_fallback(
+                gpu_factory=lambda: XGBClassifier(
                     objective="multi:softprob",
                     num_class=3,
-                    eval_metric='mlogloss',
+                    eval_metric="mlogloss",
                     n_estimators=resolved_n_estimators,
                     learning_rate=final_learning_rate,
                     max_depth=final_max_depth,
@@ -611,14 +658,11 @@ def train_xgboost_models(
                     n_jobs=2,
                     tree_method="hist",
                     device="cuda",
-                )
-                final_model.fit(x_fit.to_numpy(), y_fit_int.to_numpy(), sample_weight=fit_sample_weight)
-            except xgb.core.XGBoostError:
-                LOGGER.warning("GPU not available for final classification model, falling back to CPU")
-                final_model = XGBClassifier(
+                ),
+                cpu_factory=lambda: XGBClassifier(
                     objective="multi:softprob",
                     num_class=3,
-                    eval_metric='mlogloss',
+                    eval_metric="mlogloss",
                     n_estimators=resolved_n_estimators,
                     learning_rate=final_learning_rate,
                     max_depth=final_max_depth,
@@ -628,11 +672,14 @@ def train_xgboost_models(
                     reg_lambda=1.0,
                     random_state=42,
                     n_jobs=2,
+                    tree_method="hist",
                     device="cpu",
-                )
-                final_model.fit(x_fit.to_numpy(), y_fit_int.to_numpy(), sample_weight=fit_sample_weight)
+                ),
+                x_train=x_fit.to_numpy(),
+                y_train=y_fit_int.to_numpy(),
+                sample_weight=fit_sample_weight,
+            )
 
-            # Build metrics dict for classification
             metrics_dict = {
                 "accuracyScore": accuracy_score_val,
                 "accuracy": class_metrics["accuracy"] if class_metrics else accuracy_score_val,
@@ -645,21 +692,39 @@ def train_xgboost_models(
                 "fitRows": int(len(fit_slice)),
             }
         else:
-            final_model = XGBRegressor(
-                objective="reg:squarederror",
-                n_estimators=resolved_n_estimators,
-                learning_rate=resolved_learning_rate,
-                max_depth=4,
-                min_child_weight=2,
-                subsample=0.90,
-                colsample_bytree=0.90,
-                reg_lambda=1.0,
-                random_state=42,
-                n_jobs=2,
-                tree_method="hist",
-                device="cpu",
+            final_model = _fit_xgb_with_gpu_fallback(
+                gpu_factory=lambda: XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=resolved_learning_rate,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    tree_method="hist",
+                    device="cuda",
+                ),
+                cpu_factory=lambda: XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=resolved_learning_rate,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    tree_method="hist",
+                    device="cpu",
+                ),
+                x_train=x_fit.to_numpy(),
+                y_train=y_fit.to_numpy(),
+                sample_weight=fit_sample_weight,
             )
-            final_model.fit(x_fit.to_numpy(), y_fit.to_numpy(), sample_weight=fit_sample_weight)
 
             metrics_dict = {
                 "rmse": rmse,
@@ -684,27 +749,21 @@ def train_xgboost_models(
         model_path = _model_path_for_symbol(model_root, symbol, resolved_target_mode)
         with model_path.open("wb") as model_file:
             pickle.dump(payload, model_file)
-        # Verify persistence and log success
+
         if model_path.exists():
             file_size = model_path.stat().st_size
             LOGGER.info("Model persisted: %s (%d bytes)", model_path, file_size)
         else:
             LOGGER.error("Model file not found after save: %s", model_path)
-        trained_models += 1
 
-        symbol_metrics[symbol] = {
-            "modelPath": str(model_path),
-            **metrics_dict,
-        }
+        trained_models += 1
+        symbol_metrics[symbol] = {"modelPath": str(model_path), **metrics_dict}
 
     if trained_models == 0:
         raise RuntimeError(f"No models trained. Skipped={skipped_symbols}")
 
-    mean_accuracy = float(
-        np.mean([_safe_float(item.get("accuracyScore"), 0.0) for item in symbol_metrics.values()])
-    )
+    mean_accuracy = float(np.mean([_safe_float(item.get("accuracyScore"), 0.0) for item in symbol_metrics.values()]))
 
-    # Calculate mean F1 scores for classification mode
     if resolved_target_mode == "CLASSIFICATION":
         mean_f1_macro = float(np.mean([_safe_float(item.get("f1Macro"), 0.0) for item in symbol_metrics.values()]))
         mean_f1_buy = float(np.mean([_safe_float(item.get("f1Buy"), 0.0) for item in symbol_metrics.values()]))
@@ -739,13 +798,11 @@ def train_xgboost_models(
 
     manifest_path = _manifest_path(model_root)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    # Verify manifest persistence
     if manifest_path.exists():
         LOGGER.info("Manifest persisted: %s (%d symbols)", manifest_path, trained_models)
     else:
         LOGGER.error("Manifest file not found after save: %s", manifest_path)
 
-    # Clear in-memory model cache after new artifacts are persisted.
     with _MODEL_CACHE_LOCK:
         _MODEL_CACHE["modelDir"] = None
         _MODEL_CACHE["manifestMtime"] = None

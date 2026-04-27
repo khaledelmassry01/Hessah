@@ -274,8 +274,8 @@ def load_market_context_data(
         frame["alt_news_sentiment_score"] = np.nan
 
     frame = frame.dropna(subset=["trade_date"]).sort_values("trade_date").drop_duplicates("trade_date", keep="last")
-    frame["usd_egp_return"] = frame["usd_egp_close"].pct_change()
-    frame["gold_return"] = frame["gold_usd_close"].pct_change()
+    frame["usd_egp_return"] = frame["usd_egp_close"].pct_change(fill_method=None)
+    frame["gold_return"] = frame["gold_usd_close"].pct_change(fill_method=None)
     frame["cbe_policy_rate_pct"] = pd.to_numeric(frame.get("cbe_policy_rate_pct"), errors="coerce").ffill().bfill()
     frame["cbe_rate_changed"] = pd.to_numeric(frame.get("cbe_rate_changed"), errors="coerce").fillna(0).astype(int)
 
@@ -385,8 +385,8 @@ def add_contextual_features(raw_frame: pd.DataFrame, settings: MysqlSettings | N
 
         if price_col in merged.columns:
             # Compute returns
-            merged[return_1d_col] = merged[price_col].pct_change(1)
-            merged[return_5d_col] = merged[price_col].pct_change(5)
+            merged[return_1d_col] = merged[price_col].pct_change(1, fill_method=None)
+            merged[return_5d_col] = merged[price_col].pct_change(5, fill_method=None)
 
             # Compute zscore
             rolling_mean = merged[price_col].rolling(window=20, min_periods=10).mean()
@@ -481,7 +481,7 @@ def add_technical_indicators(raw_frame: pd.DataFrame) -> pd.DataFrame:
         local = group.copy()
         close = local["close_price"].astype(float)
 
-        local["daily_return"] = close.pct_change()
+        local["daily_return"] = close.pct_change(fill_method=None)
         local["ema_20"] = close.ewm(span=20, adjust=False).mean()
         local["ema_50"] = close.ewm(span=50, adjust=False).mean()
         local["ema_200"] = close.ewm(span=200, adjust=False).mean()  # Added for training-serving skew fix

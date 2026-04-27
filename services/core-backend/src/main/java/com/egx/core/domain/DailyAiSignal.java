@@ -46,6 +46,9 @@ public class DailyAiSignal {
     @Column(name = "confidence_score", precision = 6, scale = 4)
     private BigDecimal confidenceScore;
 
+    @Column(name = "predicted_return_5d", precision = 10, scale = 6)
+    private BigDecimal predictedReturn5d;
+
     @Column(name = "model_version", length = 64)
     private String modelVersion;
 
@@ -103,6 +106,14 @@ public class DailyAiSignal {
 
     public void setConfidenceScore(BigDecimal confidenceScore) {
         this.confidenceScore = confidenceScore;
+    }
+
+    public BigDecimal getPredictedReturn5d() {
+        return predictedReturn5d;
+    }
+
+    public void setPredictedReturn5d(BigDecimal predictedReturn5d) {
+        this.predictedReturn5d = predictedReturn5d;
     }
 
     public String getModelVersion() {

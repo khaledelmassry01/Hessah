@@ -5,6 +5,7 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 import org.springframework.http.HttpStatus;
@@ -25,12 +26,14 @@ import com.egx.core.client.dto.AiBacktestResponse;
 import com.egx.core.client.dto.AiConstraintsPayload;
 import com.egx.core.domain.DailyAiSignal;
 import com.egx.core.domain.PortfolioRun;
+import com.egx.core.domain.SignalXaiReason;
 import com.egx.core.domain.StockInstrument;
 import com.egx.core.domain.StopRule;
 import com.egx.core.domain.enums.RiskLevel;
 import com.egx.core.domain.enums.SubscriptionTier;
 import com.egx.core.repository.DailyAiSignalRepository;
 import com.egx.core.repository.PortfolioRunRepository;
+import com.egx.core.repository.SignalXaiReasonRepository;
 import com.egx.core.repository.StockInstrumentRepository;
 import com.egx.core.repository.StopRuleRepository;
 import com.egx.core.service.PremiumAccessService;
@@ -56,6 +59,7 @@ public class PremiumController {
     private final PortfolioRunRepository portfolioRunRepository;
     private final StockInstrumentRepository stockInstrumentRepository;
     private final DailyAiSignalRepository dailyAiSignalRepository;
+    private final SignalXaiReasonRepository signalXaiReasonRepository;
 
     public PremiumController(
             PremiumAccessService premiumAccessService,
@@ -64,7 +68,8 @@ public class PremiumController {
             TearSheetService tearSheetService,
             PortfolioRunRepository portfolioRunRepository,
             StockInstrumentRepository stockInstrumentRepository,
-            DailyAiSignalRepository dailyAiSignalRepository
+            DailyAiSignalRepository dailyAiSignalRepository,
+            SignalXaiReasonRepository signalXaiReasonRepository
     ) {
         this.premiumAccessService = premiumAccessService;
         this.aiClient = aiClient;
@@ -73,6 +78,7 @@ public class PremiumController {
         this.portfolioRunRepository = portfolioRunRepository;
         this.stockInstrumentRepository = stockInstrumentRepository;
         this.dailyAiSignalRepository = dailyAiSignalRepository;
+        this.signalXaiReasonRepository = signalXaiReasonRepository;
     }
 
     @PostMapping("/backtest")
@@ -130,9 +136,9 @@ public class PremiumController {
                 saved.getTakeProfitPct(),
                 saved.getIsActive(),
                 signal != null ? signal.getConfidenceScore() : null,
-                null, // predictedReturn5d removed (5NF compliance)
+                signal != null ? signal.getPredictedReturn5d() : null,
                 signal != null ? signal.getAction() : "UNKNOWN",
-                List.of() // xaiReasons removed (4NF compliance - now in signal_xai_reasons table)
+                loadXaiReasons(signal)
         );
     }
 
@@ -167,17 +173,25 @@ public class PremiumController {
                 rule.getTakeProfitPct(),
                 rule.getIsActive(),
                 signal != null ? signal.getConfidenceScore() : null,
-                null, // predictedReturn5d removed (5NF compliance)
+                signal != null ? signal.getPredictedReturn5d() : null,
                 signal != null ? signal.getAction() : "UNKNOWN",
-                List.of() // xaiReasons removed (4NF compliance - now in signal_xai_reasons table)
+                loadXaiReasons(signal)
         );
     }
 
-    private List<String> parseXaiReasons(String reasons) {
-        if (reasons == null || reasons.isBlank()) {
+    private List<String> loadXaiReasons(DailyAiSignal signal) {
+        if (signal == null || signal.getId() == null) {
             return List.of();
         }
-        return List.of(reasons.split("; "));
+
+        List<SignalXaiReason> reasons = signalXaiReasonRepository.findBySignalIdOrderByReasonOrderAsc(signal.getId());
+        return reasons.stream()
+                .map(SignalXaiReason::getReasonText)
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .limit(3)
+                .toList();
     }
 
     @GetMapping("/tear-sheet/{portfolioRunId}")

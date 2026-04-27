@@ -4,8 +4,10 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -21,9 +23,11 @@ import com.egx.core.client.dto.AiPredictionRequest;
 import com.egx.core.client.dto.AiPredictionResponse;
 import com.egx.core.client.dto.AiRecommendationItem;
 import com.egx.core.domain.DailyAiSignal;
+import com.egx.core.domain.SignalXaiReason;
 import com.egx.core.domain.StockInstrument;
 import com.egx.core.domain.StopRule;
 import com.egx.core.repository.DailyAiSignalRepository;
+import com.egx.core.repository.SignalXaiReasonRepository;
 import com.egx.core.repository.StockInstrumentRepository;
 import com.egx.core.repository.StopRuleRepository;
 
@@ -39,17 +43,20 @@ public class MarketRadarService {
     private final StopRuleRepository stopRuleRepository;
     private final StockInstrumentRepository stockInstrumentRepository;
     private final DailyAiSignalRepository dailyAiSignalRepository;
+    private final SignalXaiReasonRepository signalXaiReasonRepository;
     private final AiClient aiClient;
 
     public MarketRadarService(
             StopRuleRepository stopRuleRepository,
             StockInstrumentRepository stockInstrumentRepository,
             DailyAiSignalRepository dailyAiSignalRepository,
+            SignalXaiReasonRepository signalXaiReasonRepository,
             AiClient aiClient
     ) {
         this.stopRuleRepository = stopRuleRepository;
         this.stockInstrumentRepository = stockInstrumentRepository;
         this.dailyAiSignalRepository = dailyAiSignalRepository;
+        this.signalXaiReasonRepository = signalXaiReasonRepository;
         this.aiClient = aiClient;
     }
 
@@ -113,16 +120,20 @@ public class MarketRadarService {
 
             // Save each recommendation as a DailyAiSignal
             List<DailyAiSignal> signals = new ArrayList<>();
+            Map<String, List<String>> symbolToXaiReasons = new HashMap<>();
             for (AiRecommendationItem rec : response.getRecommendations()) {
                 if (rec == null || rec.getSymbol() == null) continue;
                 
                 DailyAiSignal signal = new DailyAiSignal();
-                signal.setSymbol(rec.getSymbol().toUpperCase());
-                signal.setStockId(symbolToId.get(rec.getSymbol().toUpperCase()));
+                String action = determineAction(rec);
+                String symbol = rec.getSymbol().toUpperCase();
+                signal.setSymbol(symbol);
+                signal.setStockId(symbolToId.get(symbol));
                 signal.setSignalDate(today);
-                signal.setAction(determineAction(rec));
+                signal.setAction(action);
                 signal.setConfidenceScore(rec.getConfidenceScore());
-                // Note: predictedReturn5d, xaiReasons, riskLevel removed (5NF/4NF compliance)
+                signal.setPredictedReturn5d(rec.getPredictedReturn5d());
+                symbolToXaiReasons.put(symbol, buildXaiReasons(rec, action));
                 signal.setModelVersion(response.getModelVersion());
                 signal.setCreatedAt(LocalDateTime.now());
                 signal.setUpdatedAt(LocalDateTime.now());
@@ -131,8 +142,12 @@ public class MarketRadarService {
             }
 
             if (!signals.isEmpty()) {
-                dailyAiSignalRepository.saveAll(signals);
-                LOGGER.info("Saved {} AI signals for market radar", signals.size());
+                List<DailyAiSignal> savedSignals = dailyAiSignalRepository.saveAll(signals);
+                for (DailyAiSignal savedSignal : savedSignals) {
+                    List<String> reasons = symbolToXaiReasons.getOrDefault(savedSignal.getSymbol(), List.of());
+                    replaceSignalXaiReasons(savedSignal.getId(), reasons);
+                }
+                LOGGER.info("Saved {} AI signals for market radar", savedSignals.size());
             }
 
         } catch (Exception e) {
@@ -190,9 +205,9 @@ public class MarketRadarService {
                 rule.getTakeProfitPct(),
                 rule.getIsActive(),
                 signal != null ? signal.getConfidenceScore() : null,
-                null, // predictedReturn5d removed (5NF compliance)
+                signal != null ? signal.getPredictedReturn5d() : null,
                 signal != null ? signal.getAction() : "UNKNOWN",
-                List.of() // xaiReasons removed (4NF compliance - now in signal_xai_reasons table)
+                loadXaiReasons(signal)
         );
     }
 
@@ -240,24 +255,82 @@ public class MarketRadarService {
         return "HOLD";
     }
 
-    /**
-     * Format XAI reasons as semicolon-separated string.
-     */
-    private String formatXaiReasons(List<String> reasons) {
-        if (reasons == null || reasons.isEmpty()) {
-            return "";
+    private List<String> buildXaiReasons(AiRecommendationItem rec, String action) {
+        List<String> normalized = new ArrayList<>();
+
+        if (rec.getTopReasons() != null) {
+            normalized.addAll(
+                    rec.getTopReasons().stream()
+                            .filter(Objects::nonNull)
+                            .map(String::trim)
+                            .filter(value -> !value.isEmpty())
+                            .toList()
+            );
         }
-        return String.join("; ", reasons);
+
+        if (normalized.isEmpty() && rec.getReason() != null && !rec.getReason().isBlank()) {
+            normalized.add(rec.getReason().trim());
+        }
+
+        if (normalized.isEmpty()) {
+            String forecastText = rec.getPredictedReturn5d() == null
+                    ? "no return forecast available"
+                    : String.format("5-day return forecast %.2f%%", rec.getPredictedReturn5d().doubleValue() * 100.0);
+            normalized.add("Action " + action + " selected with " + forecastText);
+        }
+
+        return normalized.stream().limit(3).toList();
     }
 
-    /**
-     * Parse XAI reasons from string to list.
-     */
-    private List<String> parseXaiReasons(String reasons) {
-        if (reasons == null || reasons.isBlank()) {
+    private void replaceSignalXaiReasons(Long signalId, List<String> reasons) {
+        if (signalId == null) {
+            return;
+        }
+
+        signalXaiReasonRepository.deleteBySignalId(signalId);
+
+        if (reasons == null || reasons.isEmpty()) {
+            return;
+        }
+
+        List<SignalXaiReason> rows = new ArrayList<>();
+        int order = 1;
+        for (String reason : reasons) {
+            if (reason == null || reason.isBlank()) {
+                continue;
+            }
+
+            SignalXaiReason row = new SignalXaiReason();
+            row.setSignalId(signalId);
+            row.setReasonOrder(order);
+            row.setReasonText(reason.trim());
+            row.setReasonWeight(BigDecimal.valueOf(Math.max(0.30, 0.90 - ((order - 1) * 0.20))));
+            rows.add(row);
+
+            order += 1;
+            if (order > 3) {
+                break;
+            }
+        }
+
+        if (!rows.isEmpty()) {
+            signalXaiReasonRepository.saveAll(rows);
+        }
+    }
+
+    private List<String> loadXaiReasons(DailyAiSignal signal) {
+        if (signal == null || signal.getId() == null) {
             return List.of();
         }
-        return List.of(reasons.split("; "));
+
+        return signalXaiReasonRepository.findBySignalIdOrderByReasonOrderAsc(signal.getId())
+                .stream()
+                .map(SignalXaiReason::getReasonText)
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .limit(3)
+                .toList();
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.egx.core.controller;
 
 import java.util.List;
+import java.util.Objects;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
@@ -10,8 +11,10 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.egx.core.domain.DailyAiSignal;
+import com.egx.core.domain.SignalXaiReason;
 import com.egx.core.domain.StockInstrument;
 import com.egx.core.repository.DailyAiSignalRepository;
+import com.egx.core.repository.SignalXaiReasonRepository;
 import com.egx.core.repository.StockInstrumentRepository;
 import com.egx.core.repository.StopRuleRepository;
 import com.egx.core.service.PremiumAccessService;
@@ -29,17 +32,20 @@ public class StopRuleController {
     private final StopRuleRepository stopRuleRepository;
     private final StockInstrumentRepository stockInstrumentRepository;
     private final DailyAiSignalRepository dailyAiSignalRepository;
+    private final SignalXaiReasonRepository signalXaiReasonRepository;
 
     public StopRuleController(
             PremiumAccessService premiumAccessService,
             StopRuleRepository stopRuleRepository,
             StockInstrumentRepository stockInstrumentRepository,
-            DailyAiSignalRepository dailyAiSignalRepository
+            DailyAiSignalRepository dailyAiSignalRepository,
+            SignalXaiReasonRepository signalXaiReasonRepository
     ) {
         this.premiumAccessService = premiumAccessService;
         this.stopRuleRepository = stopRuleRepository;
         this.stockInstrumentRepository = stockInstrumentRepository;
         this.dailyAiSignalRepository = dailyAiSignalRepository;
+        this.signalXaiReasonRepository = signalXaiReasonRepository;
     }
 
     @GetMapping
@@ -72,17 +78,25 @@ public class StopRuleController {
                 rule.getTakeProfitPct(),
                 rule.getIsActive(),
                 signal != null ? signal.getConfidenceScore() : null,
-                null, // predictedReturn5d removed (5NF compliance)
+                signal != null ? signal.getPredictedReturn5d() : null,
                 signal != null ? signal.getAction() : "UNKNOWN",
-                List.of() // xaiReasons removed (4NF compliance - now in signal_xai_reasons table)
+                loadXaiReasons(signal)
         );
     }
 
-    private List<String> parseXaiReasons(String reasons) {
-        if (reasons == null || reasons.isBlank()) {
+    private List<String> loadXaiReasons(DailyAiSignal signal) {
+        if (signal == null || signal.getId() == null) {
             return List.of();
         }
-        return List.of(reasons.split("; "));
+
+        List<SignalXaiReason> reasons = signalXaiReasonRepository.findBySignalIdOrderByReasonOrderAsc(signal.getId());
+        return reasons.stream()
+                .map(SignalXaiReason::getReasonText)
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .limit(3)
+                .toList();
     }
 
     private Long resolveUserId(Authentication authentication) {

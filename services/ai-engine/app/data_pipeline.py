@@ -233,8 +233,6 @@ def load_market_dataset(
 
     warnings: list[str] = []
 
-    # Try TradingView first, fall back to local CSV
-    history_by_symbol: dict[str, pd.DataFrame] = {}
     source = "tradingview"
     try:
         history_by_symbol = _load_history_from_tradingview(
@@ -244,14 +242,7 @@ def load_market_dataset(
         )
         LOGGER.info("Using TradingView as primary data source")
     except DataPipelineError as exc:
-        warnings.append(f"TradingView load failed ({exc}), falling back to local CSV")
-        LOGGER.warning(warnings[-1])
-        history_by_symbol = _load_history_from_csv(
-            as_of_date=as_of_date,
-            n_bars=n_bars,
-            warnings=warnings,
-        )
-        source = "local-csv"
+        raise DataPipelineError(f"TradingView load failed: {exc}") from exc
 
     prices, volumes = _build_price_volume_frames(history_by_symbol)
     returns = prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
@@ -322,8 +313,6 @@ def build_historical_market_data_payload(
     warnings: list[str] = []
     source = "tradingview"
 
-    # Try TradingView first, fall back to local CSV
-    history_by_symbol: dict[str, pd.DataFrame] = {}
     try:
         history_by_symbol = _load_history_from_tradingview(
             as_of_date=end_date,
@@ -331,14 +320,7 @@ def build_historical_market_data_payload(
             warnings=warnings,
         )
     except DataPipelineError as exc:
-        warnings.append(f"TradingView load failed ({exc}), falling back to local CSV")
-        LOGGER.warning(warnings[-1])
-        history_by_symbol = _load_history_from_csv(
-            as_of_date=end_date,
-            n_bars=output_bars,
-            warnings=warnings,
-        )
-        source = "local-csv"
+        raise DataPipelineError(f"TradingView historical load failed: {exc}") from exc
 
     payload: list[dict[str, Any]] = []
     for symbol, frame in sorted(history_by_symbol.items(), key=lambda item: item[0]):
@@ -371,121 +353,6 @@ def build_historical_market_data_payload(
             )
 
     return payload, source, warnings
-
-
-def _load_history_from_csv(
-    as_of_date: date,
-    n_bars: int,
-    warnings: list[str],
-) -> dict[str, pd.DataFrame]:
-    historical_dir = resolve_historical_data_dir()
-    if not historical_dir.exists():
-        raise DataPipelineError(
-            f"Historical CSV directory does not exist: {historical_dir}. Run data_seeder.py first."
-        )
-
-    csv_files = sorted(historical_dir.glob("*.csv"))
-    if not csv_files:
-        raise DataPipelineError(
-            f"No CSV files found under {historical_dir}. Run data_seeder.py first."
-        )
-
-    history_by_symbol: dict[str, pd.DataFrame] = {}
-    window_size = max(60, int(n_bars))
-
-    for csv_file in csv_files:
-        symbol, frame, warning = _read_history_csv(csv_file)
-        if warning:
-            warnings.append(warning)
-        if symbol is None or frame is None or frame.empty:
-            continue
-
-        frame = frame.loc[frame.index.date <= as_of_date]
-        if frame.empty:
-            continue
-
-        clipped = frame.sort_index().tail(window_size)
-        if clipped.empty:
-            continue
-
-        history_by_symbol[symbol] = clipped
-
-    missing_expected = [
-        symbol
-        for symbol in EGX30_CANONICAL_SYMBOLS
-        if symbol not in history_by_symbol
-    ]
-    if missing_expected:
-        warnings.append(
-            "Missing historical CSVs for symbols: " + ", ".join(missing_expected)
-        )
-
-    if not history_by_symbol:
-        raise DataPipelineError(
-            f"No usable historical CSV rows found under {historical_dir}."
-        )
-
-    LOGGER.info(
-        "Loaded local CSV history: symbols=%s directory=%s",
-        len(history_by_symbol),
-        historical_dir,
-    )
-
-    return history_by_symbol
-
-
-def _read_history_csv(csv_file: Path) -> tuple[str | None, pd.DataFrame | None, str | None]:
-    try:
-        raw = pd.read_csv(csv_file)
-    except Exception as exc:  # noqa: BLE001
-        return None, None, f"Failed to read {csv_file.name}: {exc}"
-
-    if raw.empty:
-        return None, None, f"Historical CSV {csv_file.name} is empty"
-
-    symbol = _resolve_symbol_from_frame(raw, csv_file)
-    if symbol is None:
-        return None, None, f"Could not resolve canonical symbol for {csv_file.name}"
-
-    column_map = {str(column).strip().lower(): column for column in raw.columns}
-    date_col = _pick_first_present(column_map, ["trade_date", "date", "datetime", "timestamp"])
-    open_col = _pick_first_present(column_map, ["open", "open_price", "o"])
-    high_col = _pick_first_present(column_map, ["high", "high_price", "h"])
-    low_col = _pick_first_present(column_map, ["low", "low_price", "l"])
-    close_col = _pick_first_present(column_map, ["close", "close_price", "adj_close", "c"])
-    volume_col = _pick_first_present(column_map, ["volume", "vol", "v"])
-
-    if date_col is None or close_col is None:
-        return None, None, f"Historical CSV {csv_file.name} must include date and close columns"
-
-    normalized = pd.DataFrame(
-        {
-            "trade_date": pd.to_datetime(raw[date_col], errors="coerce"),
-            "close": pd.to_numeric(raw[close_col], errors="coerce"),
-            "open": pd.to_numeric(raw[open_col], errors="coerce") if open_col is not None else np.nan,
-            "high": pd.to_numeric(raw[high_col], errors="coerce") if high_col is not None else np.nan,
-            "low": pd.to_numeric(raw[low_col], errors="coerce") if low_col is not None else np.nan,
-            "volume": pd.to_numeric(raw[volume_col], errors="coerce") if volume_col is not None else np.nan,
-        }
-    )
-
-    normalized = normalized.dropna(subset=["trade_date", "close"])
-    if normalized.empty:
-        return None, None, f"Historical CSV {csv_file.name} has no valid trade_date/close rows"
-
-    normalized["open"] = normalized["open"].fillna(normalized["close"])
-    normalized["high"] = normalized["high"].fillna(normalized["close"])
-    normalized["low"] = normalized["low"].fillna(normalized["close"])
-    normalized["volume"] = normalized["volume"].fillna(0.0).clip(lower=0.0)
-
-    ohlc = normalized[["open", "high", "low", "close"]]
-    normalized["high"] = ohlc.max(axis=1)
-    normalized["low"] = ohlc.min(axis=1)
-
-    normalized = normalized.set_index("trade_date").sort_index()
-    normalized = normalized[~normalized.index.duplicated(keep="last")]
-
-    return symbol, normalized[["open", "high", "low", "close", "volume"]], None
 
 
 def _resolve_symbol_from_frame(raw: pd.DataFrame, csv_file: Path) -> str | None:

@@ -19,10 +19,12 @@ from tvDatafeed import TvDatafeed, Interval
 
 LOGGER = logging.getLogger(__name__)
 
-# API Keys
-ALPHA_VANTAGE_API_KEY = "HEDCR99YILNP6A4A"
-FMP_API_KEY = "8ID9U3FQCVXMxIJms5jmQxRtQMUBl4aV"
-EODHD_API_KEY = "69e67350a20f86.57807831"
+import os
+
+# API Keys (read from environment to avoid hardcoding secrets)
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "HEDCR99YILNP6A4A")
+FMP_API_KEY = os.getenv("FMP_API_KEY", "8ID9U3FQCVXMxIJms5jmQxRtQMUBl4aV")
+EODHD_API_KEY = os.getenv("EODHD_API_KEY", "")
 
 # API Endpoints
 ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
@@ -98,10 +100,37 @@ class DataFetcher:
 
     def _get_tv_client(self) -> TvDatafeed:
         """Lazy-initialise an anonymous TradingView connection."""
-        if self._tv is None:
-            LOGGER.info("Initialising TradingView anonymous connection")
-            self._tv = TvDatafeed()
-        return self._tv
+        if self._tv is not None:
+            return self._tv
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                LOGGER.info(
+                    "Initialising TradingView anonymous connection (attempt %d/%d)",
+                    attempt + 1,
+                    max_retries,
+                )
+                self._tv = TvDatafeed()
+                return self._tv
+            except Exception as exc:  # noqa: BLE001
+                self._tv = None
+                if attempt == max_retries - 1:
+                    LOGGER.error(
+                        "TradingView client initialization failed after %d attempts: %s",
+                        max_retries,
+                        exc,
+                    )
+                    raise
+                LOGGER.warning(
+                    "TradingView client initialization failed (attempt %d/%d): %s. Retrying in 2 seconds.",
+                    attempt + 1,
+                    max_retries,
+                    exc,
+                )
+                time.sleep(2)
+
+        raise RuntimeError("TradingView client initialization failed")
 
     def fetch_symbol_data_tradingview(
         self,
@@ -127,70 +156,104 @@ class DataFetcher:
             DataFrame with DatetimeIndex and columns [open, high, low, close, volume].
             Returns empty DataFrame on failure (never raises).
         """
-        tradingview_limiter.wait()
-
         # Symbol translation: strip .CA suffix for TradingView, use EGX exchange
         tv_symbol = symbol.replace(".CA", "") if symbol.endswith(".CA") else symbol
         tv_exchange = "EGX"
+        max_retries = 3
 
-        try:
-            tv = self._get_tv_client()
-            LOGGER.info(f"TradingView fetch: symbol={tv_symbol} exchange={tv_exchange} n_bars={n_bars}")
+        for attempt in range(max_retries):
+            try:
+                tradingview_limiter.wait()
+                tv = self._get_tv_client()
+                LOGGER.info(
+                    "TradingView fetch: symbol=%s exchange=%s n_bars=%d (attempt %d/%d)",
+                    tv_symbol,
+                    tv_exchange,
+                    n_bars,
+                    attempt + 1,
+                    max_retries,
+                )
 
-            df = tv.get_hist(
-                symbol=tv_symbol,
-                exchange=tv_exchange,
-                interval=Interval.in_daily,
-                n_bars=n_bars,
-            )
+                df = tv.get_hist(
+                    symbol=tv_symbol,
+                    exchange=tv_exchange,
+                    interval=Interval.in_daily,
+                    n_bars=n_bars,
+                )
 
-            if df is None or df.empty:
-                LOGGER.error(f"TradingView returned empty data for {symbol}")
-                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+                if df is None or df.empty:
+                    raise RuntimeError(f"TradingView returned empty data for {symbol}")
 
-            # Drop the 'symbol' column that TradingView includes
-            if "symbol" in df.columns:
-                df = df.drop(columns=["symbol"])
+                # Drop the 'symbol' column that TradingView includes
+                if "symbol" in df.columns:
+                    df = df.drop(columns=["symbol"])
 
-            # Rename columns to match internal pipeline schema (lowercase)
-            # TradingView returns: open, high, low, close, volume (already lowercase)
-            column_map = {
-                "open": "open",
-                "high": "high",
-                "low": "low",
-                "close": "close",
-                "volume": "volume",
-            }
-            df = df.rename(columns={k: v for k, v in column_map.items() if k in df.columns})
+                # Rename columns to match internal pipeline schema (lowercase)
+                # TradingView returns: open, high, low, close, volume (already lowercase)
+                column_map = {
+                    "open": "open",
+                    "high": "high",
+                    "low": "low",
+                    "close": "close",
+                    "volume": "volume",
+                }
+                df = df.rename(columns={k: v for k, v in column_map.items() if k in df.columns})
 
-            # Ensure DatetimeIndex is timezone-naive
-            if isinstance(df.index, pd.DatetimeIndex):
-                if df.index.tz is not None:
-                    df.index = df.index.tz_localize(None)
-            else:
-                df.index = pd.to_datetime(df.index, errors="coerce")
-                if df.index.tz is not None:
-                    df.index = df.index.tz_localize(None)
+                # Ensure DatetimeIndex is timezone-naive
+                if isinstance(df.index, pd.DatetimeIndex):
+                    if df.index.tz is not None:
+                        df.index = df.index.tz_localize(None)
+                else:
+                    df.index = pd.to_datetime(df.index, errors="coerce")
+                    if df.index.tz is not None:
+                        df.index = df.index.tz_localize(None)
 
-            df = df.sort_index()
+                df = df.sort_index()
 
-            # Filter to requested date range
-            if start_date is not None:
-                start_ts = pd.Timestamp(start_date)
-                df = df.loc[df.index >= start_ts]
-            if end_date is not None:
-                end_ts = pd.Timestamp(end_date)
-                df = df.loc[df.index <= end_ts]
+                # Filter to requested date range
+                if start_date is not None:
+                    start_ts = pd.Timestamp(start_date)
+                    df = df.loc[df.index >= start_ts]
+                if end_date is not None:
+                    end_ts = pd.Timestamp(end_date)
+                    df = df.loc[df.index <= end_ts]
 
-            LOGGER.info(
-                f"TradingView fetched {len(df)} bars for {symbol} "
-                f"({df.index.min().date() if len(df) else 'N/A'} to {df.index.max().date() if len(df) else 'N/A'})"
-            )
-            return df[["open", "high", "low", "close", "volume"]]
+                LOGGER.info(
+                    "TradingView fetched %d bars for %s (%s to %s)",
+                    len(df),
+                    symbol,
+                    df.index.min().date() if len(df) else "N/A",
+                    df.index.max().date() if len(df) else "N/A",
+                )
+                return df[["open", "high", "low", "close", "volume"]]
 
-        except Exception as e:
-            LOGGER.error(f"TradingView fetch failed for {symbol}: {e}")
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            except Exception as exc:  # noqa: BLE001
+                self._tv = None
+                # Gracefully handle connection reset scenarios and throttle retries
+                if isinstance(exc, ConnectionResetError) or "ConnectionResetError" in str(exc):
+                    LOGGER.warning(
+                        "TradingView connection reset during fetch for %s: %s",
+                        symbol,
+                        exc,
+                    )
+                if attempt == max_retries - 1:
+                    LOGGER.error(
+                        "TradingView fetch failed after %d attempts for %s: %s",
+                        max_retries,
+                        symbol,
+                        exc,
+                    )
+                    return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+                LOGGER.warning(
+                    "TradingView fetch attempt %d/%d failed for %s: %s. Retrying in 7 seconds.",
+                    attempt + 1,
+                    max_retries,
+                    symbol,
+                    exc,
+                )
+                time.sleep(7)
+
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
     def _fetch_tradingview_egx(
         self,

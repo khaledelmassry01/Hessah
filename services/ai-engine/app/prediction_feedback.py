@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import json
 import re
 from typing import Any
 
@@ -43,7 +44,7 @@ def _normalize_symbol(symbol: str) -> str:
 
 
 def _ensure_daily_ai_signals_table(connection) -> None:
-    """Ensure daily_ai_signals table exists."""
+    """Ensure MarketWatch signal tables exist using normalized XAI storage."""
     cursor = connection.cursor()
     try:
         cursor.execute(
@@ -72,9 +73,48 @@ def _ensure_daily_ai_signals_table(connection) -> None:
                 "ALTER TABLE daily_ai_signals ADD COLUMN predicted_return_5d DECIMAL(10,6) NULL AFTER confidence_score"
             )
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signal_xai_reasons (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                signal_id BIGINT NOT NULL,
+                reason_order INT NOT NULL,
+                reason_text VARCHAR(500) NOT NULL,
+                reason_weight DECIMAL(6,4) NULL,
+                KEY idx_signal_xai_reasons_signal_id (signal_id),
+                CONSTRAINT fk_signal_xai_reasons_signal
+                    FOREIGN KEY (signal_id) REFERENCES daily_ai_signals(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signal_auxiliary_metrics (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                signal_id BIGINT NOT NULL,
+                metric_type VARCHAR(32) NOT NULL,
+                metric_value DECIMAL(10,6) NULL,
+                metadata_json JSON NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_aux_metrics_type (signal_id, metric_type),
+                CONSTRAINT fk_signal_auxiliary_metrics_signal
+                    FOREIGN KEY (signal_id) REFERENCES daily_ai_signals(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
         connection.commit()
     finally:
         cursor.close()
+
+
+def _normalize_metric_type(raw_metric_type: Any, fallback_index: int) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_]", "_", str(raw_metric_type or "").strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    if not normalized:
+        normalized = f"metric_{fallback_index}"
+    return normalized[:32]
 
 
 def save_predictions_to_daily_signals(
@@ -83,11 +123,12 @@ def save_predictions_to_daily_signals(
     model_version: str = "xgb-egx30-v1",
     settings: MysqlSettings | None = None,
 ) -> int:
-    """Save AI predictions to daily_ai_signals table for MarketWatch.
+    """Save AI predictions to MarketWatch tables with normalized XAI storage.
     
     Args:
         signal_date: The date for the signals
-        recommendations: List of recommendation dicts with 'symbol', 'action', 'confidence_score', and optional 'predicted_return_5d'
+        recommendations: List of recommendation dicts with 'symbol', 'action', 'confidence_score',
+            optional 'predicted_return_5d', 'xai_reasons', 'xai_reason_weights', and 'xai_aux_metrics'
         model_version: Model version string
         settings: MySQL connection settings
         
@@ -109,22 +150,115 @@ def save_predictions_to_daily_signals(
             symbol = rec.get("symbol", "").upper().strip()
             if not symbol:
                 continue
+
             # Determine action from recommendation
             action = rec.get("action", "HOLD")
-            confidence = rec.get("confidence_score", 0.0)
-            predicted_return_5d = rec.get("predicted_return_5d")
+            try:
+                confidence = float(rec.get("confidence_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+
+            predicted_return_5d_raw = rec.get("predicted_return_5d")
+            try:
+                predicted_return_5d = float(predicted_return_5d_raw) if predicted_return_5d_raw is not None else None
+            except (TypeError, ValueError):
+                predicted_return_5d = None
+
+            raw_xai_reasons = rec.get("xai_reasons")
+
+            if isinstance(raw_xai_reasons, list):
+                xai_reasons = [str(item).strip() for item in raw_xai_reasons if str(item).strip()]
+            elif isinstance(raw_xai_reasons, str) and raw_xai_reasons.strip():
+                xai_reasons = [raw_xai_reasons.strip()]
+            else:
+                xai_reasons = []
+
+            if not xai_reasons:
+                xai_reasons = [f"Action {action} selected by the model ensemble"]
+            xai_reasons = xai_reasons[:3]
+
+            raw_reason_weights = rec.get("xai_reason_weights")
+            parsed_weights: list[float | None] = []
+            if isinstance(raw_reason_weights, list):
+                for item in raw_reason_weights:
+                    try:
+                        parsed_weights.append(round(float(item), 4))
+                    except (TypeError, ValueError):
+                        parsed_weights.append(None)
+
+            xai_reason_weights: list[float] = []
+            for idx in range(len(xai_reasons)):
+                inferred_weight = round(max(0.3, 0.9 - (idx * 0.2)), 4)
+                if idx < len(parsed_weights) and parsed_weights[idx] is not None:
+                    inferred_weight = round(float(parsed_weights[idx]), 4)
+                xai_reason_weights.append(inferred_weight)
+
+            raw_aux_metrics = rec.get("xai_aux_metrics")
+            aux_metrics: list[dict[str, Any]] = []
+            if isinstance(raw_aux_metrics, list):
+                for metric_index, metric in enumerate(raw_aux_metrics, start=1):
+                    if not isinstance(metric, dict):
+                        continue
+
+                    metric_type = _normalize_metric_type(metric.get("metric_type"), metric_index)
+
+                    metric_value_raw = metric.get("metric_value")
+                    try:
+                        metric_value = float(metric_value_raw) if metric_value_raw is not None else None
+                    except (TypeError, ValueError):
+                        metric_value = None
+
+                    if metric_value is None:
+                        continue
+
+                    metadata = metric.get("metadata")
+                    if not isinstance(metadata, dict):
+                        metadata = {"raw": str(metadata)} if metadata is not None else {}
+
+                    aux_metrics.append(
+                        {
+                            "metric_type": metric_type,
+                            "metric_value": metric_value,
+                            "metadata": metadata,
+                        }
+                    )
+
+            if not aux_metrics:
+                if predicted_return_5d is not None:
+                    aux_metrics.append(
+                        {
+                            "metric_type": "predicted_return_5d",
+                            "metric_value": float(predicted_return_5d),
+                            "metadata": {"source": "model_output"},
+                        }
+                    )
+                aux_metrics.append(
+                    {
+                        "metric_type": "confidence_score",
+                        "metric_value": float(confidence),
+                        "metadata": {"source": "model_output"},
+                    }
+                )
+
+            deduplicated_aux_metrics: dict[str, dict[str, Any]] = {}
+            for aux_metric in aux_metrics:
+                deduplicated_aux_metrics[str(aux_metric["metric_type"])] = aux_metric
+            aux_metrics = list(deduplicated_aux_metrics.values())
             
             rows.append(
-                (
-                    symbol,
-                    signal_date,
-                    action,
-                    float(confidence),
-                    float(predicted_return_5d) if predicted_return_5d is not None else None,
-                    model_version,
-                    now,
-                    now,
-                )
+                {
+                    "symbol": symbol,
+                    "signal_date": signal_date,
+                    "action": action,
+                    "confidence_score": confidence,
+                    "predicted_return_5d": predicted_return_5d,
+                    "model_version": model_version,
+                    "created_at": now,
+                    "updated_at": now,
+                    "xai_reasons": xai_reasons,
+                    "xai_reason_weights": xai_reason_weights,
+                    "aux_metrics": aux_metrics,
+                }
             )
 
         if not rows:
@@ -132,28 +266,97 @@ def save_predictions_to_daily_signals(
 
         cursor = connection.cursor()
         try:
-            cursor.executemany(
-                """
-                INSERT INTO daily_ai_signals (
-                    symbol,
-                    signal_date,
-                    action,
-                    confidence_score,
-                    predicted_return_5d,
-                    model_version,
-                    created_at,
-                    updated_at
+            for row in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO daily_ai_signals (
+                        symbol,
+                        signal_date,
+                        action,
+                        confidence_score,
+                        predicted_return_5d,
+                        model_version,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        id = LAST_INSERT_ID(id),
+                        action = VALUES(action),
+                        confidence_score = VALUES(confidence_score),
+                        predicted_return_5d = VALUES(predicted_return_5d),
+                        model_version = VALUES(model_version),
+                        updated_at = VALUES(updated_at)
+                    """,
+                    (
+                        row["symbol"],
+                        row["signal_date"],
+                        row["action"],
+                        row["confidence_score"],
+                        row["predicted_return_5d"],
+                        row["model_version"],
+                        row["created_at"],
+                        row["updated_at"],
+                    ),
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    action = VALUES(action),
-                    confidence_score = VALUES(confidence_score),
-                    predicted_return_5d = VALUES(predicted_return_5d),
-                    model_version = VALUES(model_version),
-                    updated_at = VALUES(updated_at)
-                """,
-                rows,
-            )
+
+                signal_id = int(cursor.lastrowid)
+
+                cursor.execute("DELETE FROM signal_xai_reasons WHERE signal_id = %s", (signal_id,))
+                reason_rows = [
+                    (
+                        signal_id,
+                        reason_index,
+                        reason_text,
+                        row["xai_reason_weights"][reason_index - 1]
+                        if reason_index - 1 < len(row["xai_reason_weights"])
+                        else None,
+                    )
+                    for reason_index, reason_text in enumerate(row["xai_reasons"], start=1)
+                ]
+                if reason_rows:
+                    cursor.executemany(
+                        """
+                        INSERT INTO signal_xai_reasons (
+                            signal_id,
+                            reason_order,
+                            reason_text,
+                            reason_weight
+                        )
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        reason_rows,
+                    )
+
+                cursor.execute("DELETE FROM signal_auxiliary_metrics WHERE signal_id = %s", (signal_id,))
+                metric_rows = []
+                for aux_metric in row["aux_metrics"]:
+                    metadata_json = json.dumps(aux_metric.get("metadata") or {}, ensure_ascii=True)
+                    metric_rows.append(
+                        (
+                            signal_id,
+                            aux_metric["metric_type"],
+                            aux_metric["metric_value"],
+                            metadata_json,
+                            row["updated_at"],
+                        )
+                    )
+
+                if metric_rows:
+                    cursor.executemany(
+                        """
+                        INSERT INTO signal_auxiliary_metrics (
+                            signal_id,
+                            metric_type,
+                            metric_value,
+                            metadata_json,
+                            created_at
+                        )
+                        VALUES (%s, %s, %s, CAST(%s AS JSON), %s)
+                        """,
+                        metric_rows,
+                    )
+
             connection.commit()
         finally:
             cursor.close()
