@@ -987,6 +987,70 @@ def predict_symbol_forecasts(
     return ForecastBatch(forecasts=forecasts, warnings=warnings, model_accuracy=batch_accuracy)
 
 
+class ModelTrainer:
+    """Unified trainer/predictor for both CLASSIFICATION and REGRESSION target modes."""
+
+    def __init__(self, model_dir: str | Path | None = None) -> None:
+        self._model_dir = model_dir
+
+    @property
+    def model_dir(self) -> str | Path | None:
+        return self._model_dir
+
+    def train_models(
+        self,
+        target_mode: str | None = None,
+        symbols: list[str] | None = None,
+        horizon_days: int = DEFAULT_HORIZON_DAYS,
+        min_rows_per_symbol: int = DEFAULT_MIN_ROWS_PER_SYMBOL,
+        train_start: date = DEFAULT_TRAIN_START,
+        train_end: date = DEFAULT_TRAIN_END,
+        validation_start: date = DEFAULT_VALIDATION_START,
+        validation_end: date = DEFAULT_VALIDATION_END,
+        use_recency_weighting: bool = True,
+        n_estimators: int = 380,
+        learning_rate: float = 0.07,
+    ) -> dict[str, Any]:
+        return train_xgboost_models(
+            model_dir=self._model_dir,
+            target_mode=target_mode,
+            symbols=symbols,
+            horizon_days=horizon_days,
+            min_rows_per_symbol=min_rows_per_symbol,
+            train_start=train_start,
+            train_end=train_end,
+            validation_start=validation_start,
+            validation_end=validation_end,
+            use_recency_weighting=use_recency_weighting,
+            n_estimators=n_estimators,
+            learning_rate=learning_rate,
+        )
+
+    def train_models_with_retry(
+        self,
+        attempts: int = 5,
+        delay_seconds: float = 20.0,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return train_models_with_retry(
+            attempts=attempts,
+            delay_seconds=delay_seconds,
+            model_dir=self._model_dir,
+            **kwargs,
+        )
+
+    def predict_symbol_forecasts(
+        self,
+        as_of_date: date,
+        symbols: list[str],
+    ) -> ForecastBatch:
+        return predict_symbol_forecasts(
+            as_of_date=as_of_date,
+            symbols=symbols,
+            model_dir=self._model_dir,
+        )
+
+
 def _build_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and persist EGX XGBoost models")
     parser.add_argument("--model-dir", type=str, default="")

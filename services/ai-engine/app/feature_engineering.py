@@ -637,7 +637,10 @@ def build_latest_feature_rows(
     if enriched.empty:
         return enriched
 
-    enriched = enriched.groupby("symbol", group_keys=False).apply(lambda group: group.ffill()).reset_index(drop=True)
+    enriched = enriched.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+    ffill_columns = [column for column in enriched.columns if column != "symbol"]
+    enriched[ffill_columns] = enriched.groupby("symbol", group_keys=False)[ffill_columns].ffill()
+
     latest = (
         enriched.sort_values(["symbol", "trade_date"])
         .groupby("symbol", as_index=False)

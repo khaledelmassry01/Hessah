@@ -23,9 +23,10 @@ from .contracts import (
 from .data_pipeline import DataPipelineError, canonicalize_symbol, load_market_dataset
 from .historical_ingestion import ingest_historical_market_data_to_core
 from .instrument_sync import fetch_core_instrument_catalog, sync_live_instruments_to_core
-from .model_training import predict_symbol_forecasts, train_models_with_retry
+from .model_trainer import ModelTrainer
 from .optimizer import optimize_max_sharpe
-from .prediction_feedback import log_prediction_batch, reconcile_prediction_feedback, save_predictions_to_daily_signals
+from .prediction_service import PredictionService
+from .prediction_feedback import log_prediction_batch, reconcile_prediction_feedback
 
 # Import APScheduler for daily predictions
 try:
@@ -69,6 +70,8 @@ LATEST_TRAINING_SUMMARY: dict[str, object] = {}
 
 # Model persistence directory (must match docker-compose volume mount)
 MODEL_DIR = Path("/app/models")
+MODEL_TRAINER = ModelTrainer(model_dir=os.getenv("AI_MODEL_DIR", str(MODEL_DIR)))
+PREDICTION_SERVICE = PredictionService(model_dir=os.getenv("AI_MODEL_DIR", str(MODEL_DIR)))
 
 
 def _initialize_model_directory() -> None:
@@ -439,7 +442,7 @@ def predict(payload: PredictRequest) -> PredictResponse:
 
         sector_to_indices = _build_sector_index_map(eligible_symbols, sectors)
 
-        ml_forecasts = predict_symbol_forecasts(
+        ml_forecasts = MODEL_TRAINER.predict_symbol_forecasts(
             as_of_date=payload.as_of_date,
             symbols=eligible_symbols,
         )
@@ -1161,9 +1164,9 @@ def _run_startup_training(attempts: int, delay_seconds: float) -> None:
 
 
 def _run_startup_daily_prediction(delay_seconds: float) -> None:
-    """Run daily prediction on startup and save to database."""
+    """Run unified daily prediction sync on startup and save to database."""
     import time
-    from datetime import date, datetime
+    from datetime import date
 
     # Wait for initial training to complete
     LOGGER.info("Waiting %.0f seconds before daily prediction...", delay_seconds)
@@ -1172,113 +1175,42 @@ def _run_startup_daily_prediction(delay_seconds: float) -> None:
     try:
         today = date.today()
         today_str = today.isoformat()
-        LOGGER.info("Running startup daily prediction for %s", today_str)
+        LOGGER.info("Running startup unified daily signal sync for %s", today_str)
 
-        # Build prediction request for system radar
-        payload = PredictRequest(
-            request_id=f"startup-daily-{today_str}",
-            user_id="SYSTEM_RADAR",
-            as_of_date=today_str,
-            budget_egp="1000000.00",
-            risk_level="MEDIUM",
-            tier="PREMIUM",
-            constraints=ConstraintBlock(
-                max_sector_weight="0.40",
-                max_adv30_participation="0.05",
-                exclude_suspended=True,
-                allow_fractional_shares=False,
-            ),
+        sync_result = PREDICTION_SERVICE.generate_daily_signals(
+            as_of_date=today,
+            model_version=MODEL_VERSION,
         )
-
-        # Call prediction logic directly
-        result = predict(payload)
-
         LOGGER.info(
-            "Daily prediction completed: status=%s allocations=%d recommendations=%d",
-            result.status,
-            len(result.allocations),
-            len(result.recommendations) if hasattr(result, 'recommendations') else 0,
+            "Startup daily signal sync completed: predictions=%d saved=%d warnings=%d",
+            int(sync_result.get("predictionCount") or 0),
+            int(sync_result.get("savedCount") or 0),
+            len(sync_result.get("warnings") or []),
         )
-
-        # Save to database if successful
-        if result.status == "SUCCESS" and hasattr(result, 'recommendations'):
-            # Convert recommendations to dicts for saving
-            recs = [
-                {
-                    "symbol": rec.symbol,
-                    "action": rec.action,
-                    "confidence_score": rec.confidence_score,
-                }
-                for rec in result.recommendations
-            ]
-            
-            saved_count = save_predictions_to_daily_signals(
-                signal_date=today,
-                recommendations=recs,
-                model_version=MODEL_VERSION,
-            )
-            LOGGER.info("✓ Saved %d daily signals to database", saved_count)
-        else:
-            LOGGER.warning("⚠ Daily prediction returned status: %s", result.status)
 
     except Exception:  # noqa: BLE001
         LOGGER.exception("Startup daily prediction failed")
 
 
 def _run_scheduled_daily_prediction() -> None:
-    """Run daily prediction at scheduled time (4 PM). Called by APScheduler."""
+    """Run unified daily signal sync at scheduled time (4 PM). Called by APScheduler."""
     from datetime import date
 
     try:
         today = date.today()
         today_str = today.isoformat()
-        LOGGER.info("[SCHEDULED] Running 4 PM daily prediction for %s", today_str)
+        LOGGER.info("[SCHEDULED] Running 4 PM unified daily signal sync for %s", today_str)
 
-        # Build prediction request for system radar
-        payload = PredictRequest(
-            request_id=f"scheduled-4pm-{today_str}",
-            user_id="SYSTEM_RADAR",
-            as_of_date=today_str,
-            budget_egp="1000000.00",
-            risk_level="MEDIUM",
-            tier="PREMIUM",
-            constraints=ConstraintBlock(
-                max_sector_weight="0.40",
-                max_adv30_participation="0.05",
-                exclude_suspended=True,
-                allow_fractional_shares=False,
-            ),
+        sync_result = PREDICTION_SERVICE.generate_daily_signals(
+            as_of_date=today,
+            model_version=MODEL_VERSION,
         )
-
-        # Call prediction logic directly
-        result = predict(payload)
-
         LOGGER.info(
-            "[SCHEDULED] Prediction completed: status=%s allocations=%d recommendations=%d",
-            result.status,
-            len(result.allocations),
-            len(result.recommendations) if hasattr(result, 'recommendations') else 0,
+            "[SCHEDULED] Daily signal sync completed: predictions=%d saved=%d warnings=%d",
+            int(sync_result.get("predictionCount") or 0),
+            int(sync_result.get("savedCount") or 0),
+            len(sync_result.get("warnings") or []),
         )
-
-        # Save to database if successful
-        if result.status == "SUCCESS" and hasattr(result, 'recommendations'):
-            recs = [
-                {
-                    "symbol": rec.symbol,
-                    "action": rec.action,
-                    "confidence_score": rec.confidence_score,
-                }
-                for rec in result.recommendations
-            ]
-
-            saved_count = save_predictions_to_daily_signals(
-                signal_date=today,
-                recommendations=recs,
-                model_version=MODEL_VERSION,
-            )
-            LOGGER.info("[SCHEDULED] ✓ Saved %d daily signals to database", saved_count)
-        else:
-            LOGGER.warning("[SCHEDULED] ⚠ Prediction returned status: %s", result.status)
 
     except Exception:  # noqa: BLE001
         LOGGER.exception("[SCHEDULED] Daily prediction failed")
@@ -1296,7 +1228,6 @@ def _train_ml_models(
     train_end: str = "2025-12-31",
 ) -> dict[str, object]:
     from datetime import date, timedelta
-    from app.model_training import train_xgboost_models
 
     train_start_date = date.fromisoformat(train_start)
     train_end_date = date.fromisoformat(train_end)
@@ -1304,8 +1235,9 @@ def _train_ml_models(
     validation_start_date = train_end_date + timedelta(days=1)
     validation_end_date = date(2026, 12, 31)
 
-    summary = train_xgboost_models(
-        model_dir=os.getenv("AI_MODEL_DIR", "/app/models"),
+    summary = MODEL_TRAINER.train_models_with_retry(
+        attempts=max(1, attempts),
+        delay_seconds=max(1.0, float(delay_seconds)),
         target_mode=target_mode or os.getenv("AI_TARGET_MODE", "CLASSIFICATION"),
         horizon_days=int(_resolve_env_float("AI_FORECAST_HORIZON_DAYS", FORECAST_HORIZON_DAYS, minimum=1.0)),
         min_rows_per_symbol=int(_resolve_env_float("AI_MIN_ROWS_PER_SYMBOL", 120.0, minimum=20.0)),

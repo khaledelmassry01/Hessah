@@ -11,7 +11,7 @@ from .feature_engineering import (
     load_historical_market_data,
     open_mysql_connection,
 )
-from .model_training import train_models_with_retry
+from .model_trainer import train_models_with_retry
 
 PREDICTION_HORIZON_DAYS = 5
 DEFAULT_LOOKBACK_ROWS = 30
