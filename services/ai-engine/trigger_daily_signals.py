@@ -10,8 +10,8 @@ Usage:
     python trigger_daily_signals.py [--core-url CORE_URL] [--ai-url AI_URL]
 
 Options:
-    --core-url    Core backend URL (default: http://localhost:8080)
-    --ai-url      AI engine URL (default: http://localhost:8000)
+    --core-url    Core backend URL (default: http://localhost:8083)
+    --ai-url      AI engine URL (default: http://localhost:8002)
     --admin-user  Admin username for core-backend (default: admin)
     --admin-pass  Admin password for core-backend (default: admin123)
 """
@@ -32,13 +32,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--core-url",
-        default="http://localhost:8080",
-        help="Core backend base URL (default: http://localhost:8080)",
+        default="http://localhost:8083",
+        help="Core backend base URL (default: http://localhost:8083)",
     )
     parser.add_argument(
         "--ai-url",
-        default="http://localhost:8000",
-        help="AI engine base URL (default: http://localhost:8000)",
+        default="http://localhost:8002",
+        help="AI engine base URL (default: http://localhost:8002)",
     )
     parser.add_argument(
         "--admin-user",

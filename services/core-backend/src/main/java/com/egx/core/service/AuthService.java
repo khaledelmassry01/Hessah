@@ -1,5 +1,22 @@
 package com.egx.core.service;
 
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+import com.egx.core.domain.Role;
 import com.egx.core.domain.Subscription;
 import com.egx.core.domain.TokenBlacklist;
 import com.egx.core.domain.User;
@@ -9,26 +26,15 @@ import com.egx.core.domain.enums.AccountStatus;
 import com.egx.core.domain.enums.KycStatus;
 import com.egx.core.domain.enums.SubscriptionStatus;
 import com.egx.core.domain.enums.SubscriptionTier;
+import com.egx.core.repository.RoleRepository;
 import com.egx.core.repository.SubscriptionRepository;
 import com.egx.core.repository.TokenBlacklistRepository;
 import com.egx.core.repository.UserRepository;
 import com.egx.core.repository.UserSessionRepository;
 import com.egx.core.repository.WalletRepository;
 import com.egx.core.security.JwtService;
-import jakarta.transaction.Transactional;
-import org.springframework.http.HttpStatus;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.stereotype.Service;
-import org.springframework.web.server.ResponseStatusException;
 
-import java.math.BigDecimal;
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.util.LinkedHashMap;
-import java.util.Locale;
-import java.util.Map;
-import java.util.UUID;
+import jakarta.transaction.Transactional;
 
 @Service
 public class AuthService {
@@ -38,6 +44,7 @@ public class AuthService {
     private final WalletRepository walletRepository;
     private final TokenBlacklistRepository tokenBlacklistRepository;
     private final UserSessionRepository userSessionRepository;
+    private final RoleRepository roleRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final SecurityAuditService securityAuditService;
@@ -48,6 +55,7 @@ public class AuthService {
             WalletRepository walletRepository,
             TokenBlacklistRepository tokenBlacklistRepository,
             UserSessionRepository userSessionRepository,
+            RoleRepository roleRepository,
             PasswordEncoder passwordEncoder,
             JwtService jwtService,
             SecurityAuditService securityAuditService
@@ -57,6 +65,7 @@ public class AuthService {
         this.walletRepository = walletRepository;
         this.tokenBlacklistRepository = tokenBlacklistRepository;
         this.userSessionRepository = userSessionRepository;
+        this.roleRepository = roleRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
         this.securityAuditService = securityAuditService;
@@ -82,6 +91,11 @@ public class AuthService {
         user.setCreatedAt(now);
         user.setUpdatedAt(now);
 
+        // Assign default USER role from many-to-many RBAC
+        Role defaultRole = roleRepository.findByName("USER")
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Default role not found"));
+        user.addRole(defaultRole);
+
         User savedUser = userRepository.save(user);
 
         Subscription subscription = new Subscription();
@@ -103,11 +117,17 @@ public class AuthService {
         wallet.setUpdatedAt(now);
         walletRepository.save(wallet);
 
+        // Convert roles to list of role names for response
+        List<String> roleNames = savedUser.getRoles().stream()
+                .map(Role::getName)
+                .collect(Collectors.toList());
+
         return new RegisteredUser(
                 savedUser.getId(),
                 savedUser.getEmail(),
                 savedUser.getFullName(),
-                SubscriptionTier.FREE
+                SubscriptionTier.FREE,
+                roleNames
         );
     }
 
@@ -151,7 +171,11 @@ public class AuthService {
         }
 
         SubscriptionTier tier = resolveCurrentTier(user.getId());
-        JwtService.TokenPair tokenPair = jwtService.issueTokenPair(user.getId(), user.getEmail(), tier);
+        // Get all roles as comma-separated string for JWT
+        String rolesCsv = user.getRoles().stream()
+                .map(Role::getName)
+                .collect(Collectors.joining(","));
+        JwtService.TokenPair tokenPair = jwtService.issueTokenPair(user.getId(), user.getEmail(), tier, rolesCsv);
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
 
         UserSession session = new UserSession();
@@ -171,18 +195,24 @@ public class AuthService {
             buildAuditDetails(
                 "OK",
                 command.ipAddress(),
-                Map.of("tier", tier.name())
+                Map.of("tier", tier.name(), "role", user.getPrimaryRoleName())
             )
         );
+
+        // Convert roles to list for response
+        List<String> roleNames = user.getRoles().stream()
+                .map(Role::getName)
+                .collect(Collectors.toList());
 
         return new AuthTokens(
                 user.getId(),
                 tier,
+                roleNames,
                 tokenPair.accessToken(),
                 tokenPair.accessTokenExpiresAt(),
                 tokenPair.refreshToken(),
-            tokenPair.refreshTokenExpiresAt(),
-            tokenPair
+                tokenPair.refreshTokenExpiresAt(),
+                tokenPair
         );
     }
 
@@ -223,7 +253,11 @@ public class AuthService {
         blacklistToken(refreshToken, jwtService.extractExpiration(refreshToken), nowUtc);
 
         SubscriptionTier tier = resolveCurrentTier(user.getId());
-        JwtService.TokenPair tokenPair = jwtService.issueTokenPair(user.getId(), user.getEmail(), tier);
+        // Get all roles as comma-separated string for JWT
+        String rolesCsv = user.getRoles().stream()
+                .map(Role::getName)
+                .collect(Collectors.joining(","));
+        JwtService.TokenPair tokenPair = jwtService.issueTokenPair(user.getId(), user.getEmail(), tier, rolesCsv);
 
         existingSession.setRefreshTokenJti(tokenPair.refreshTokenJti());
         if (command.userAgent() != null && !command.userAgent().isBlank()) {
@@ -237,9 +271,15 @@ public class AuthService {
         existingSession.setIsRevoked(false);
         userSessionRepository.save(existingSession);
 
+        // Convert roles to list for response
+        List<String> roleNames = user.getRoles().stream()
+                .map(Role::getName)
+                .collect(Collectors.toList());
+
         return new AuthTokens(
                 user.getId(),
                 tier,
+                roleNames,
                 tokenPair.accessToken(),
                 tokenPair.accessTokenExpiresAt(),
                 tokenPair.refreshToken(),
@@ -351,12 +391,13 @@ public class AuthService {
     public record RefreshCommand(String refreshToken, String userAgent, String ipAddress) {
     }
 
-    public record RegisteredUser(Long userId, String email, String fullName, SubscriptionTier tier) {
+    public record RegisteredUser(Long userId, String email, String fullName, SubscriptionTier tier, List<String> roles) {
     }
 
     public record AuthTokens(
             Long userId,
             SubscriptionTier tier,
+            List<String> roles,
             String accessToken,
             Instant accessTokenExpiresAt,
             String refreshToken,

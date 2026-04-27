@@ -1,6 +1,8 @@
 package com.egx.core.domain;
 
 import java.time.LocalDateTime;
+import java.util.HashSet;
+import java.util.Set;
 
 import com.egx.core.domain.enums.AccountStatus;
 import com.egx.core.domain.enums.KycStatus;
@@ -11,9 +13,13 @@ import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.JoinTable;
+import jakarta.persistence.ManyToMany;
 import jakarta.persistence.Table;
 
 @Entity
@@ -48,6 +54,14 @@ public class User {
     @Enumerated(EnumType.STRING)
     @Column(name = "account_status", nullable = false, length = 16)
     private AccountStatus accountStatus;
+
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(
+        name = "user_roles",
+        joinColumns = @JoinColumn(name = "user_id"),
+        inverseJoinColumns = @JoinColumn(name = "role_id")
+    )
+    private Set<Role> roles = new HashSet<>();
 
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
@@ -117,6 +131,62 @@ public class User {
 
     public void setAccountStatus(AccountStatus accountStatus) {
         this.accountStatus = accountStatus;
+    }
+
+    public Set<Role> getRoles() {
+        return roles;
+    }
+
+    public void setRoles(Set<Role> roles) {
+        this.roles = roles;
+    }
+
+    /**
+     * Helper method to get the primary role name.
+     * For backward compatibility with single-role systems.
+     * @return the first role name, or "USER" if no roles assigned
+     */
+    public String getPrimaryRoleName() {
+        return roles.stream()
+                .findFirst()
+                .map(Role::getName)
+                .orElse("USER");
+    }
+
+    /**
+     * Check if user has a specific role.
+     */
+    public boolean hasRole(String roleName) {
+        return roles.stream()
+                .anyMatch(role -> role.getName().equalsIgnoreCase(roleName));
+    }
+
+    /**
+     * Check if user has any of the specified roles.
+     */
+    public boolean hasAnyRole(String... roleNames) {
+        for (String roleName : roleNames) {
+            if (hasRole(roleName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Add a role to the user.
+     */
+    public void addRole(Role role) {
+        this.roles.add(role);
+        role.getUsers().add(this);
+    }
+
+    /**
+     * Remove a role from the user.
+     */
+    public void removeRole(Role role) {
+        this.roles.remove(role);
+        role.getUsers().remove(this);
     }
 
     public LocalDateTime getCreatedAt() {

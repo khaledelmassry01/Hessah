@@ -1,26 +1,33 @@
 package com.egx.core.security;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+
+import javax.crypto.SecretKey;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
 import com.egx.core.domain.enums.SubscriptionTier;
+
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-
-import javax.crypto.SecretKey;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.Date;
-import java.util.Locale;
-import java.util.UUID;
 
 @Service
 public class JwtService {
 
     private static final String CLAIM_USER_ID = "userId";
     private static final String CLAIM_TIER = "tier";
+    private static final String CLAIM_ROLE = "role";
     private static final String CLAIM_TOKEN_TYPE = "tokenType";
     private static final String CLAIM_REFRESH_TOKEN_JTI = "refreshTokenJti";
 
@@ -43,10 +50,10 @@ public class JwtService {
         this.refreshTokenTtl = Duration.ofDays(refreshTokenDays);
     }
 
-    public TokenPair issueTokenPair(Long userId, String subjectEmail, SubscriptionTier tier) {
+    public TokenPair issueTokenPair(Long userId, String subjectEmail, SubscriptionTier tier, String roles) {
         String refreshTokenJti = UUID.randomUUID().toString();
-        String accessToken = generateAccessToken(userId, subjectEmail, tier, refreshTokenJti);
-        String refreshToken = generateRefreshToken(userId, subjectEmail, tier, refreshTokenJti);
+        String accessToken = generateAccessToken(userId, subjectEmail, tier, roles, refreshTokenJti);
+        String refreshToken = generateRefreshToken(userId, subjectEmail, tier, roles, refreshTokenJti);
 
         return new TokenPair(
                 accessToken,
@@ -89,6 +96,22 @@ public class JwtService {
         return SubscriptionTier.valueOf(value.toString().toUpperCase(Locale.ROOT));
     }
 
+    public String extractRoles(String token) {
+        Object value = parseClaims(token).get(CLAIM_ROLE);
+        if (value == null) {
+            return "USER";
+        }
+        return value.toString().toUpperCase(Locale.ROOT);
+    }
+
+    public List<String> extractRolesList(String token) {
+        String roles = extractRoles(token);
+        if (roles == null || roles.isBlank()) {
+            return new ArrayList<>(List.of("USER"));
+        }
+        return new ArrayList<>(Arrays.asList(roles.split(",")));
+    }
+
     public String extractRefreshTokenJti(String token) {
         String claim = extractStringClaim(token, CLAIM_REFRESH_TOKEN_JTI);
         if (claim == null || claim.isBlank()) {
@@ -117,12 +140,14 @@ public class JwtService {
             Long userId,
             String subjectEmail,
             SubscriptionTier tier,
+            String roles,
             String refreshTokenJti
     ) {
         return generateToken(
                 userId,
                 subjectEmail,
                 tier,
+                roles,
                 TokenType.ACCESS,
                 accessTokenTtl,
                 UUID.randomUUID().toString(),
@@ -134,12 +159,14 @@ public class JwtService {
             Long userId,
             String subjectEmail,
             SubscriptionTier tier,
+            String roles,
             String refreshTokenJti
     ) {
         return generateToken(
                 userId,
                 subjectEmail,
                 tier,
+                roles,
                 TokenType.REFRESH,
                 refreshTokenTtl,
                 refreshTokenJti,
@@ -151,6 +178,7 @@ public class JwtService {
             Long userId,
             String subjectEmail,
             SubscriptionTier tier,
+            String roles,
             TokenType tokenType,
             Duration ttl,
             String tokenJti,
@@ -166,6 +194,7 @@ public class JwtService {
                 .expiration(Date.from(expiry))
                 .claim(CLAIM_USER_ID, userId)
                 .claim(CLAIM_TIER, tier.name())
+                .claim(CLAIM_ROLE, roles)
                 .claim(CLAIM_TOKEN_TYPE, tokenType.name())
                 .claim(CLAIM_REFRESH_TOKEN_JTI, refreshTokenJti)
                 .signWith(signingKey)

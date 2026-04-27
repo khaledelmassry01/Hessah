@@ -1,7 +1,7 @@
 import { Suspense, lazy } from "react";
 import { Route, Routes } from "react-router-dom";
 
-import { ProtectedRoute, PublicOnlyRoute } from "@/routes/ProtectedRoute";
+import { ProtectedRoute, PublicOnlyRoute, ProRoute, AdminRoute } from "@/routes/ProtectedRoute";
 
 const DashboardLayout = lazy(() =>
   import("@/components/layout/AppShell").then((module) => ({
@@ -69,6 +69,18 @@ const ProfileSettingsPage = lazy(() =>
   })),
 );
 
+const UpgradePage = lazy(() =>
+  import("@/pages/UpgradePage").then((module) => ({
+    default: module.UpgradePage,
+  })),
+);
+
+const AdminDashboardPage = lazy(() =>
+  import("@/pages/admin/AdminDashboardPage").then((module) => ({
+    default: module.default,
+  })),
+);
+
 function RouteFallback() {
   return (
     <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
@@ -91,14 +103,27 @@ export default function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/optimize" element={<OptimizerPage />} />
             <Route path="/optimizer" element={<OptimizerPage />} />
-            <Route path="/performance" element={<AILearningDashboardPage />} />
-            <Route path="/premium/backtest" element={<BacktestPage />} />
-            <Route path="/premium/ai-learning" element={<AILearningDashboardPage />} />
-            <Route path="/premium/ai-performance" element={<AIPerformancePage />} />
-            <Route path="/premium/market-watch" element={<MarketWatchPage />} />
+            <Route path="/upgrade" element={<UpgradePage />} />
             <Route path="/settings/profile" element={<ProfileSettingsPage />} />
             <Route path="/profile-sessions" element={<ProfileSettingsPage />} />
             <Route path="/settings/profile-sessions" element={<ProfileSettingsPage />} />
+          </Route>
+
+          <Route element={<ProRoute />}>
+            <Route element={<DashboardLayout />}>
+              <Route path="/performance" element={<AILearningDashboardPage />} />
+              <Route path="/premium/backtest" element={<BacktestPage />} />
+              <Route path="/premium/ai-learning" element={<AILearningDashboardPage />} />
+              <Route path="/premium/ai-performance" element={<AIPerformancePage />} />
+              <Route path="/premium/market-watch" element={<MarketWatchPage />} />
+            </Route>
+          </Route>
+
+          <Route element={<AdminRoute />}>
+            <Route element={<DashboardLayout />}>
+              <Route path="/admin" element={<AdminDashboardPage />} />
+              <Route path="/admin/dashboard" element={<AdminDashboardPage />} />
+            </Route>
           </Route>
         </Route>
 

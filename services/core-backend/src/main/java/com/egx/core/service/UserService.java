@@ -1,5 +1,15 @@
 package com.egx.core.service;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+import com.egx.core.domain.Role;
 import com.egx.core.domain.Subscription;
 import com.egx.core.domain.User;
 import com.egx.core.domain.enums.AccountStatus;
@@ -8,13 +18,8 @@ import com.egx.core.domain.enums.SubscriptionStatus;
 import com.egx.core.domain.enums.SubscriptionTier;
 import com.egx.core.repository.SubscriptionRepository;
 import com.egx.core.repository.UserRepository;
-import jakarta.transaction.Transactional;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
-import org.springframework.web.server.ResponseStatusException;
 
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
+import jakarta.transaction.Transactional;
 
 @Service
 public class UserService {
@@ -55,6 +60,10 @@ public class UserService {
 
     private UserProfile toUserProfile(User user) {
         SubscriptionTier tier = resolveCurrentTier(user.getId());
+        // Convert roles to list of names for response
+        List<String> roleNames = user.getRoles().stream()
+                .map(Role::getName)
+                .collect(Collectors.toList());
         return new UserProfile(
                 user.getId(),
                 user.getEmail(),
@@ -62,6 +71,7 @@ public class UserService {
                 user.getPhone(),
                 user.getKycStatus(),
                 user.getAccountStatus(),
+                roleNames,
                 tier,
                 user.getCreatedAt(),
                 user.getUpdatedAt()
@@ -96,6 +106,7 @@ public class UserService {
             String phone,
             KycStatus kycStatus,
             AccountStatus accountStatus,
+            List<String> roles,
             SubscriptionTier tier,
             LocalDateTime createdAt,
             LocalDateTime updatedAt

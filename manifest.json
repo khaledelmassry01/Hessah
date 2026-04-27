@@ -1,0 +1,7 @@
+{
+  "symbols": ["ABUK.CA", "ALCN.CA", "AMOC.CA", "AUTO.CA", "BTFH.CA", "CCAP.CA", "CIEB.CA", "CLHO.CA", "COMI.CA", "DOMT.CA", "EAST.CA", "EFIH.CA", "EKHO.CA", "ETEL.CA"],
+  "targetMode": "CLASSIFICATION",
+  "meanAccuracy": 0.55,
+  "meanF1Macro": 0.52,
+  "trainedAtUtc": "2026-04-26T01:00:00Z"
+}

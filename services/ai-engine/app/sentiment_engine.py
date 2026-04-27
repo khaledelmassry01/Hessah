@@ -54,8 +54,10 @@ def _download_sp500_prices(start_date: pd.Timestamp, end_date: pd.Timestamp) -> 
 
     try:
         LOGGER.info("Fetching S&P500 data from Stooq: %s", url.replace(STOOQ_API_KEY, "REDACTED"))
-        # Using pandas directly as requested for CSV reading
-        frame = pd.read_csv(url)
+        # Use a bounded network call so model training does not hang when upstream is unavailable.
+        with urlopen(url, timeout=15) as response:
+            payload = response.read()
+        frame = pd.read_csv(io.BytesIO(payload))
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("S&P500 download failed from Stooq: %s", exc)
         return pd.DataFrame(columns=["trade_date", "close_price"])

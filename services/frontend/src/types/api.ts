@@ -3,6 +3,7 @@ export type RiskLevel = "LOW" | "MEDIUM" | "HIGH";
 export interface AuthTokenBundle {
   userId: number;
   tier: string;
+  role: string; // Comma-separated roles from JWT
   sessionId?: string;
   accessToken: string;
   accessTokenExpiresAt?: string | null;
@@ -27,6 +28,7 @@ export interface RegisterResponse {
   email: string;
   fullName: string;
   tier: string;
+  role: string; // Primary role for backward compatibility
   message?: string;
 }
 
@@ -36,6 +38,7 @@ export interface UserProfile {
   fullName: string;
   phone?: string | null;
   tier: string;
+  role: string; // Primary role for backward compatibility
   kycStatus?: string;
   accountStatus?: string;
   createdAt?: string;

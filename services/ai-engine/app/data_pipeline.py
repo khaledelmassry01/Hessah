@@ -232,11 +232,26 @@ def load_market_dataset(
         raise ValueError("max_adv30_participation must be > 0")
 
     warnings: list[str] = []
-    history_by_symbol = _load_history_from_csv(
-        as_of_date=as_of_date,
-        n_bars=n_bars,
-        warnings=warnings,
-    )
+
+    # Try TradingView first, fall back to local CSV
+    history_by_symbol: dict[str, pd.DataFrame] = {}
+    source = "tradingview"
+    try:
+        history_by_symbol = _load_history_from_tradingview(
+            as_of_date=as_of_date,
+            n_bars=n_bars,
+            warnings=warnings,
+        )
+        LOGGER.info("Using TradingView as primary data source")
+    except DataPipelineError as exc:
+        warnings.append(f"TradingView load failed ({exc}), falling back to local CSV")
+        LOGGER.warning(warnings[-1])
+        history_by_symbol = _load_history_from_csv(
+            as_of_date=as_of_date,
+            n_bars=n_bars,
+            warnings=warnings,
+        )
+        source = "local-csv"
 
     prices, volumes = _build_price_volume_frames(history_by_symbol)
     returns = prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
@@ -305,12 +320,25 @@ def build_historical_market_data_payload(
     output_bars = max(TRADING_DAYS_PER_YEAR * years, TRADING_DAYS_PER_YEAR)
     start_date = end_date - timedelta(days=366 * years)
     warnings: list[str] = []
-    source = "local-csv"
-    history_by_symbol = _load_history_from_csv(
-        as_of_date=end_date,
-        n_bars=output_bars,
-        warnings=warnings,
-    )
+    source = "tradingview"
+
+    # Try TradingView first, fall back to local CSV
+    history_by_symbol: dict[str, pd.DataFrame] = {}
+    try:
+        history_by_symbol = _load_history_from_tradingview(
+            as_of_date=end_date,
+            n_bars=output_bars,
+            warnings=warnings,
+        )
+    except DataPipelineError as exc:
+        warnings.append(f"TradingView load failed ({exc}), falling back to local CSV")
+        LOGGER.warning(warnings[-1])
+        history_by_symbol = _load_history_from_csv(
+            as_of_date=end_date,
+            n_bars=output_bars,
+            warnings=warnings,
+        )
+        source = "local-csv"
 
     payload: list[dict[str, Any]] = []
     for symbol, frame in sorted(history_by_symbol.items(), key=lambda item: item[0]):
@@ -479,6 +507,76 @@ def _resolve_sector(symbol: str) -> str:
         return "UNCLASSIFIED"
 
     return DEFAULT_SECTOR_MAP.get(base_symbol, "UNCLASSIFIED")
+
+
+def _load_history_from_tradingview(
+    as_of_date: date,
+    n_bars: int,
+    warnings: list[str],
+) -> dict[str, pd.DataFrame]:
+    """
+    Load historical OHLCV data from TradingView for all EGX30 symbols.
+
+    Falls back gracefully per-symbol: if TradingView fails for one symbol,
+    that symbol is skipped rather than aborting the entire load.
+
+    Returns a dict mapping canonical symbol -> DataFrame with DatetimeIndex
+    and columns [open, high, low, close, volume].
+    """
+    from .data_fetcher import DataFetcher
+
+    fetcher = DataFetcher()
+    history_by_symbol: dict[str, pd.DataFrame] = {}
+    window_size = max(60, int(n_bars))
+
+    for canonical in EGX30_CANONICAL_SYMBOLS:
+        try:
+            df = fetcher.fetch_symbol_data_tradingview(
+                symbol=canonical,
+                start_date=as_of_date - timedelta(days=366 * 15),
+                end_date=as_of_date,
+                n_bars=window_size,
+            )
+            if df is None or df.empty:
+                warnings.append(f"TradingView returned no data for {canonical}")
+                continue
+
+            # Filter to as_of_date and clip to window
+            df = df.loc[df.index.date <= as_of_date]
+            if df.empty:
+                continue
+            clipped = df.sort_index().tail(window_size)
+            if clipped.empty:
+                continue
+
+            history_by_symbol[canonical] = clipped
+            LOGGER.info(f"TradingView loaded {len(clipped)} bars for {canonical}")
+
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"TradingView fetch failed for {canonical}: {exc}")
+            continue
+
+    missing_expected = [
+        symbol
+        for symbol in EGX30_CANONICAL_SYMBOLS
+        if symbol not in history_by_symbol
+    ]
+    if missing_expected:
+        warnings.append(
+            "TradingView missing data for symbols: " + ", ".join(missing_expected)
+        )
+
+    if not history_by_symbol:
+        raise DataPipelineError(
+            "TradingView returned no data for any EGX30 symbol"
+        )
+
+    LOGGER.info(
+        "Loaded TradingView history: symbols=%s",
+        len(history_by_symbol),
+    )
+
+    return history_by_symbol
 
 
 def _normalize_ohlcv_frame(raw: Any) -> pd.DataFrame:

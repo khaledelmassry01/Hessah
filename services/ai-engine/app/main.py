@@ -3,6 +3,7 @@ import uuid
 import logging
 import threading
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -24,9 +25,18 @@ from .historical_ingestion import ingest_historical_market_data_to_core
 from .instrument_sync import fetch_core_instrument_catalog, sync_live_instruments_to_core
 from .model_training import predict_symbol_forecasts, train_models_with_retry
 from .optimizer import optimize_max_sharpe
-from .prediction_feedback import log_prediction_batch, reconcile_prediction_feedback
+from .prediction_feedback import log_prediction_batch, reconcile_prediction_feedback, save_predictions_to_daily_signals
+
+# Import APScheduler for daily predictions
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    SCHEDULER_AVAILABLE = True
+except ImportError:
+    SCHEDULER_AVAILABLE = False
 
 app = FastAPI(title="EGX AI Engine", version="0.0.1")
+DAILY_SCHEDULER: BackgroundScheduler | None = None
 LOGGER = logging.getLogger(__name__)
 MODEL_VERSION = "xgb-egx30-v1"
 DEFAULT_RETRAIN_BUDGET_EGP = 500_000.0
@@ -39,8 +49,15 @@ PREVENTIVE_SELL_THRESHOLD_5D = -0.10
 SMART_MAX_SECTOR_CAP = 0.40
 SMART_MIN_CONFIDENCE = 0.35  # RELAXED: Was 0.50, lowered to allow more symbols through
 RUNTIME_SMART_MONEY_LOW_VOLUME_DOWNSCALE = 0.95
-DYNAMIC_CONFIDENCE_MIN = 0.30
+DYNAMIC_CONFIDENCE_MIN = 0.25  # RELAXED: Was 0.30, lowered for demo mode
 DYNAMIC_CONFIDENCE_MAX = 0.75
+
+# RELAXED THRESHOLDS for Demo Mode - ensures optimizer selects stocks instead of 100% CASH
+CONFIDENCE_THRESHOLDS = {
+    "LOW": 0.30,      # Was 0.50
+    "MEDIUM": 0.40,   # Was 0.60
+    "HIGH": 0.50,     # Was 0.70
+}
 TOP_RECOMMENDATION_COUNT = 3
 ALT_NEWS_INFLUENCE_THRESHOLD = 0.08
 ALT_COMMODITY_INFLUENCE_THRESHOLD = 0.10
@@ -50,14 +67,28 @@ BRENT_SYMBOL_ROOTS = {"AMOC", "SKPC"}
 TRAINING_STATE_LOCK = threading.Lock()
 LATEST_TRAINING_SUMMARY: dict[str, object] = {}
 
+# Model persistence directory (must match docker-compose volume mount)
+MODEL_DIR = Path("/app/models")
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "UP"}
+
+def _initialize_model_directory() -> None:
+    """Ensure the model persistence directory exists and is writable."""
+    try:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        # Test write permission by creating a sentinel file
+        sentinel = MODEL_DIR / ".write_test"
+        sentinel.write_text("ok", encoding="utf-8")
+        sentinel.unlink()  # Remove test file
+        LOGGER.info("Model directory initialized and writable: %s", MODEL_DIR)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error("Failed to initialize model directory %s: %s", MODEL_DIR, exc)
 
 
 @app.on_event("startup")
 def startup_training() -> None:
+    # Initialize model directory first (before any training)
+    _initialize_model_directory()
+
     if not _resolve_env_bool("AI_AUTO_TRAIN_ON_STARTUP", True):
         LOGGER.info("ML auto-training is disabled by AI_AUTO_TRAIN_ON_STARTUP")
         return
@@ -71,6 +102,72 @@ def startup_training() -> None:
         daemon=True,
     )
     thread.start()
+
+
+@app.on_event("startup")
+def startup_daily_prediction() -> None:
+    """Auto-run daily prediction on startup to populate MarketWatch signals."""
+    if not _resolve_env_bool("AI_AUTO_PREDICT_ON_STARTUP", True):
+        LOGGER.info("Daily auto-prediction is disabled by AI_AUTO_PREDICT_ON_STARTUP")
+        return
+
+    # Delay to let training complete first
+    delay_seconds = _resolve_env_float("AI_AUTO_PREDICT_DELAY_SECONDS", 60.0, minimum=10.0)
+
+    thread = threading.Thread(
+        target=_run_startup_daily_prediction,
+        kwargs={"delay_seconds": delay_seconds},
+        daemon=True,
+    )
+    thread.start()
+
+
+@app.on_event("startup")
+def startup_scheduler() -> None:
+    """Setup scheduled daily prediction at 4 PM (matching MarketRadarScheduler)."""
+    global DAILY_SCHEDULER
+
+    if not SCHEDULER_AVAILABLE:
+        LOGGER.info("APScheduler not available, skipping scheduled predictions")
+        return
+
+    if not _resolve_env_bool("AI_SCHEDULED_PREDICTIONS", True):
+        LOGGER.info("Scheduled predictions disabled by AI_SCHEDULED_PREDICTIONS")
+        return
+
+    try:
+        DAILY_SCHEDULER = BackgroundScheduler()
+
+        # Schedule daily prediction at 4:00 PM (16:00) - Egypt market close
+        # SUN-THU (0-4 in cron), matching the Java MarketRadarScheduler
+        trigger = CronTrigger(
+            hour=16,
+            minute=0,
+            day_of_week="0-4",  # Sunday to Thursday
+        )
+
+        DAILY_SCHEDULER.add_job(
+            _run_scheduled_daily_prediction,
+            trigger=trigger,
+            id="daily_prediction_4pm",
+            name="Daily AI Prediction at 4 PM",
+            replace_existing=True,
+        )
+
+        DAILY_SCHEDULER.start()
+        LOGGER.info("✓ Scheduled daily predictions at 4:00 PM (SUN-THU)")
+
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Failed to start prediction scheduler")
+
+
+@app.on_event("shutdown")
+def shutdown_scheduler() -> None:
+    """Shutdown the scheduler on app shutdown."""
+    global DAILY_SCHEDULER
+    if DAILY_SCHEDULER is not None:
+        DAILY_SCHEDULER.shutdown()
+        LOGGER.info("Prediction scheduler shutdown")
 
 
 @app.post("/models/train")
@@ -349,6 +446,7 @@ def predict(payload: PredictRequest) -> PredictResponse:
         warnings.extend(ml_forecasts.warnings)
 
         annualization_factor = TRADING_DAYS_PER_YEAR / FORECAST_HORIZON_DAYS
+        request_risk_level = str(payload.risk_level).upper() if payload.risk_level else "MEDIUM"
         symbol_predicted_return_5d: dict[str, float] = {}
         symbol_confidence_raw: dict[str, float] = {}
         symbol_confidence: dict[str, float] = {}
@@ -421,6 +519,7 @@ def predict(payload: PredictRequest) -> PredictResponse:
                 market_sentiment_score=market_sentiment_score,
                 smart_money_signal=smart_money_signal,
                 relative_volume_60d=relative_volume_60d,
+                risk_level=request_risk_level,
             )
 
             symbol_predicted_return_5d[symbol] = predicted_return_5d
@@ -439,15 +538,16 @@ def predict(payload: PredictRequest) -> PredictResponse:
             symbol_alt_urea_influence[symbol] = alt_urea_influence_share
             symbol_alt_brent_influence[symbol] = alt_brent_influence_share
 
-        if smart_money_downgraded_symbols > 0:
-            warnings.append(
-                f"Smart-money filter reduced confidence for {smart_money_downgraded_symbols} symbol(s)"
-            )
+        # DISABLED: Smart-money penalty disabled for demo mode
+        # if smart_money_downgraded_symbols > 0:
+        #     warnings.append(
+        #         f"Smart-money filter reduced confidence for {smart_money_downgraded_symbols} symbol(s)"
+        #     )
 
         if symbol_dynamic_threshold:
             dynamic_threshold_values = list(symbol_dynamic_threshold.values())
             warnings.append(
-                "Dynamic confidence thresholds active "
+                f"RELAXED Demo thresholds ({request_risk_level}) active "
                 f"(min={min(dynamic_threshold_values):.2f}, max={max(dynamic_threshold_values):.2f})"
             )
 
@@ -741,31 +841,28 @@ def _compute_dynamic_confidence_threshold(
     market_sentiment_score: float,
     smart_money_signal: float,
     relative_volume_60d: float,
+    risk_level: str = "MEDIUM",
 ) -> float:
-    threshold = float(base_threshold)
+    # Use risk-tier based threshold from CONFIDENCE_THRESHOLDS (RELAXED for demo)
+    threshold = float(CONFIDENCE_THRESHOLDS.get(risk_level, CONFIDENCE_THRESHOLDS["MEDIUM"]))
 
-    # RELAXED: Reduced threshold adjustments to allow more symbols through
+    # Minimal adjustments for demo mode - mostly use the flat risk-tier threshold
     if risk_reward_ratio < 0.0:
-        threshold += 0.08  # Reduced from 0.14
-    elif risk_reward_ratio < 0.5:
-        threshold += 0.04  # Reduced from 0.08
-    elif risk_reward_ratio > 1.3:
-        threshold -= 0.04  # Reduced adjustment
-    elif risk_reward_ratio > 0.8:
-        threshold -= 0.02  # Reduced adjustment
+        threshold += 0.05  # Further reduced from 0.08
+    elif risk_reward_ratio > 1.5:
+        threshold -= 0.03
 
-    if market_sentiment_score <= -0.25:  # Wider threshold (was -0.20)
-        threshold += 0.03  # Reduced from 0.05
-    elif market_sentiment_score >= 0.25:  # Wider threshold (was 0.20)
-        threshold -= 0.02  # Reduced adjustment
+    if market_sentiment_score <= -0.30:
+        threshold += 0.02
+    elif market_sentiment_score >= 0.30:
+        threshold -= 0.02
 
-    if smart_money_signal <= -0.10:  # Wider threshold (was -0.05)
-        threshold += 0.03  # Reduced from 0.05
-    elif smart_money_signal >= 0.10:  # Wider threshold (was 0.08)
-        threshold -= 0.01  # Reduced adjustment
+    # DISABLED: Smart-money penalty removed for demo
+    # if smart_money_signal <= -0.10:
+    #     threshold += 0.03
 
-    if relative_volume_60d < 0.8:  # Wider threshold (was < 1.0)
-        threshold += 0.02  # Reduced from 0.04
+    if relative_volume_60d < 0.6:
+        threshold += 0.01
 
     return float(np.clip(threshold, DYNAMIC_CONFIDENCE_MIN, DYNAMIC_CONFIDENCE_MAX))
 
@@ -1061,6 +1158,130 @@ def _run_startup_training(attempts: int, delay_seconds: float) -> None:
         )
     except Exception:  # noqa: BLE001
         LOGGER.exception("Startup ML training failed")
+
+
+def _run_startup_daily_prediction(delay_seconds: float) -> None:
+    """Run daily prediction on startup and save to database."""
+    import time
+    from datetime import date, datetime
+
+    # Wait for initial training to complete
+    LOGGER.info("Waiting %.0f seconds before daily prediction...", delay_seconds)
+    time.sleep(delay_seconds)
+
+    try:
+        today = date.today()
+        today_str = today.isoformat()
+        LOGGER.info("Running startup daily prediction for %s", today_str)
+
+        # Build prediction request for system radar
+        payload = PredictRequest(
+            request_id=f"startup-daily-{today_str}",
+            user_id="SYSTEM_RADAR",
+            as_of_date=today_str,
+            budget_egp="1000000.00",
+            risk_level="MEDIUM",
+            tier="PREMIUM",
+            constraints=ConstraintBlock(
+                max_sector_weight="0.40",
+                max_adv30_participation="0.05",
+                exclude_suspended=True,
+                allow_fractional_shares=False,
+            ),
+        )
+
+        # Call prediction logic directly
+        result = predict(payload)
+
+        LOGGER.info(
+            "Daily prediction completed: status=%s allocations=%d recommendations=%d",
+            result.status,
+            len(result.allocations),
+            len(result.recommendations) if hasattr(result, 'recommendations') else 0,
+        )
+
+        # Save to database if successful
+        if result.status == "SUCCESS" and hasattr(result, 'recommendations'):
+            # Convert recommendations to dicts for saving
+            recs = [
+                {
+                    "symbol": rec.symbol,
+                    "action": rec.action,
+                    "confidence_score": rec.confidence_score,
+                }
+                for rec in result.recommendations
+            ]
+            
+            saved_count = save_predictions_to_daily_signals(
+                signal_date=today,
+                recommendations=recs,
+                model_version=MODEL_VERSION,
+            )
+            LOGGER.info("✓ Saved %d daily signals to database", saved_count)
+        else:
+            LOGGER.warning("⚠ Daily prediction returned status: %s", result.status)
+
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Startup daily prediction failed")
+
+
+def _run_scheduled_daily_prediction() -> None:
+    """Run daily prediction at scheduled time (4 PM). Called by APScheduler."""
+    from datetime import date
+
+    try:
+        today = date.today()
+        today_str = today.isoformat()
+        LOGGER.info("[SCHEDULED] Running 4 PM daily prediction for %s", today_str)
+
+        # Build prediction request for system radar
+        payload = PredictRequest(
+            request_id=f"scheduled-4pm-{today_str}",
+            user_id="SYSTEM_RADAR",
+            as_of_date=today_str,
+            budget_egp="1000000.00",
+            risk_level="MEDIUM",
+            tier="PREMIUM",
+            constraints=ConstraintBlock(
+                max_sector_weight="0.40",
+                max_adv30_participation="0.05",
+                exclude_suspended=True,
+                allow_fractional_shares=False,
+            ),
+        )
+
+        # Call prediction logic directly
+        result = predict(payload)
+
+        LOGGER.info(
+            "[SCHEDULED] Prediction completed: status=%s allocations=%d recommendations=%d",
+            result.status,
+            len(result.allocations),
+            len(result.recommendations) if hasattr(result, 'recommendations') else 0,
+        )
+
+        # Save to database if successful
+        if result.status == "SUCCESS" and hasattr(result, 'recommendations'):
+            recs = [
+                {
+                    "symbol": rec.symbol,
+                    "action": rec.action,
+                    "confidence_score": rec.confidence_score,
+                }
+                for rec in result.recommendations
+            ]
+
+            saved_count = save_predictions_to_daily_signals(
+                signal_date=today,
+                recommendations=recs,
+                model_version=MODEL_VERSION,
+            )
+            LOGGER.info("[SCHEDULED] ✓ Saved %d daily signals to database", saved_count)
+        else:
+            LOGGER.warning("[SCHEDULED] ⚠ Prediction returned status: %s", result.status)
+
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("[SCHEDULED] Daily prediction failed")
 
 
 def _train_ml_models(

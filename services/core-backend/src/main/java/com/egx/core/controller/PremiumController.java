@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.UUID;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -41,6 +42,7 @@ import jakarta.validation.constraints.NotNull;
 
 @RestController
 @RequestMapping({"/premium", "/api/core/premium"})
+@PreAuthorize("hasAnyRole('PRO', 'ADMIN')")
 @Validated
 public class PremiumController {
 

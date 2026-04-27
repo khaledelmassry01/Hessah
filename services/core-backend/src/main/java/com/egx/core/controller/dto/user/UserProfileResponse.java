@@ -8,6 +8,7 @@ public record UserProfileResponse(
         String fullName,
         String phone,
         String tier,
+        String role,
         String kycStatus,
         String accountStatus,
         LocalDateTime createdAt,

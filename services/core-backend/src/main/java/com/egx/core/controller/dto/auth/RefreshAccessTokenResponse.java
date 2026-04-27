@@ -5,6 +5,7 @@ import java.time.Instant;
 public record RefreshAccessTokenResponse(
         Long userId,
         String tier,
+        String role,
         String accessToken,
         Instant accessTokenExpiresAt,
         String refreshToken,

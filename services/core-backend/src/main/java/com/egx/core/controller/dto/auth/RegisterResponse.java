@@ -5,6 +5,7 @@ public record RegisterResponse(
         String email,
         String fullName,
         String tier,
+        String role,
         String message
 ) {
 }

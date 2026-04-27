@@ -1,9 +1,5 @@
 package com.egx.core.controller;
 
-import com.egx.core.controller.dto.user.UpdateProfileRequest;
-import com.egx.core.controller.dto.user.UserProfileResponse;
-import com.egx.core.service.UserService;
-import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
@@ -13,6 +9,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+
+import com.egx.core.controller.dto.user.UpdateProfileRequest;
+import com.egx.core.controller.dto.user.UserProfileResponse;
+import com.egx.core.service.UserService;
+
+import jakarta.validation.Valid;
 
 @RestController
 @RequestMapping({"/users", "/api/core/users"})
@@ -59,12 +61,16 @@ public class UserController {
     }
 
     private UserProfileResponse mapProfile(UserService.UserProfile profile) {
+        // Get primary role for backward compatibility (first role or USER)
+        String primaryRole = profile.roles().isEmpty() ? "USER" : profile.roles().get(0);
+
         return new UserProfileResponse(
                 profile.userId(),
                 profile.email(),
                 profile.fullName(),
                 profile.phone(),
                 profile.tier().name(),
+                primaryRole,
                 profile.kycStatus().name(),
                 profile.accountStatus().name(),
                 profile.createdAt(),

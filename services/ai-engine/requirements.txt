@@ -15,4 +15,7 @@ mysql-connector-python==9.0.0
 yfinance==0.2.54
 requests>=2.31.0
 investpy>=1.0.8
+apscheduler>=3.10.0
+tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git
+websocket-client>=1.6.0
 git+https://github.com/egxlytics/egxpy.git

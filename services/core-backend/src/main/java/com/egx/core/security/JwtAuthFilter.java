@@ -3,7 +3,9 @@ package com.egx.core.security;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -15,7 +17,6 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.egx.core.domain.User;
 import com.egx.core.domain.enums.AccountStatus;
-import com.egx.core.domain.enums.SubscriptionTier;
 import com.egx.core.repository.TokenBlacklistRepository;
 import com.egx.core.repository.UserRepository;
 import com.egx.core.repository.UserSessionRepository;
@@ -107,11 +108,21 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 return;
                 }
 
-            SubscriptionTier tier = jwtService.extractTier(token);
+            List<String> roles = jwtService.extractRolesList(token);
+            List<SimpleGrantedAuthority> authorities = new ArrayList<>();
+            if (roles != null && !roles.isEmpty()) {
+                authorities = roles.stream()
+                        .filter(r -> r != null && !r.isBlank())
+                        .map(r -> new SimpleGrantedAuthority("ROLE_" + r.trim()))
+                        .collect(Collectors.toList());
+            }
+            if (authorities.isEmpty()) {
+                authorities.add(new SimpleGrantedAuthority("ROLE_USER"));
+            }
             UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
                     userId,
                     null,
-                    List.of(new SimpleGrantedAuthority("ROLE_" + tier.name()))
+                    authorities
             );
             authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
             SecurityContextHolder.getContext().setAuthentication(authentication);

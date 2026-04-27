@@ -1,7 +1,9 @@
 """
 Multi-Source Data Fetcher Module
-Integrates Investing.com, Alpha Vantage, and Financial Modeling Prep (FMP)
+Integrates TradingView, Investing.com, Alpha Vantage, and Financial Modeling Prep (FMP)
 with fallback chain logic for resilient data retrieval.
+
+TradingView (tvdatafeed) is the primary source for EGX stock OHLCV data.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from typing import Any, Callable
 
 import pandas as pd
 import requests
+from tvDatafeed import TvDatafeed, Interval
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,11 +31,11 @@ EODHD_BASE_URL = "https://eodhd.com/api"
 
 # Source priority for fallback chain
 FALLBACK_CHAIN = {
-    "egx_stocks": ["eodhd", "investing_com", "yfinance"],
-    "brent_crude": ["eodhd", "fmp", "yfinance", "investing_com"],
+    "egx_stocks": ["tradingview", "eodhd", "investing_com", "yfinance"],
+    "brent_crude": ["tradingview", "eodhd", "fmp", "yfinance", "investing_com"],
     "urea": ["investing_com", "yfinance"],
     "technical_indicators": ["alpha_vantage", "fmp"],
-    "usd_egp": ["alpha_vantage", "yfinance"],
+    "usd_egp": ["tradingview", "alpha_vantage", "yfinance"],
     "gold": ["alpha_vantage", "yfinance"],
     "sp500": ["fmp", "alpha_vantage", "yfinance"],
 }
@@ -70,6 +73,7 @@ alpha_vantage_limiter = RateLimiter(calls_per_minute=5)  # Free tier: 5 calls/mi
 fmp_limiter = RateLimiter(calls_per_minute=10)  # FMP has higher limits
 investing_limiter = RateLimiter(calls_per_minute=3)  # Be gentle with investing.com
 eodhd_limiter = RateLimiter(calls_per_minute=20)  # EODHD generous limits
+tradingview_limiter = RateLimiter(calls_per_minute=40)  # TradingView anonymous mode allows ~40/min
 
 
 class DataFetcher:
@@ -88,6 +92,151 @@ class DataFetcher:
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
+        self._tv: TvDatafeed | None = None  # Lazy-initialised TradingView client
+
+    # ==================== TradingView Methods ====================
+
+    def _get_tv_client(self) -> TvDatafeed:
+        """Lazy-initialise an anonymous TradingView connection."""
+        if self._tv is None:
+            LOGGER.info("Initialising TradingView anonymous connection")
+            self._tv = TvDatafeed()
+        return self._tv
+
+    def fetch_symbol_data_tradingview(
+        self,
+        symbol: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        n_bars: int = 5000,
+    ) -> pd.DataFrame:
+        """
+        Fetch OHLCV data from TradingView for a given symbol.
+
+        Handles EGX symbol translation (.CA suffix removal) and returns
+        a DataFrame with DatetimeIndex and lowercase OHLCV columns matching
+        the internal data_pipeline schema.
+
+        Args:
+            symbol: EGX symbol in Reuters/Yahoo format (e.g. 'COMI.CA', 'HRHO.CA')
+            start_date: Optional start date filter
+            end_date: Optional end date filter
+            n_bars: Number of bars to request from TradingView (default 5000)
+
+        Returns:
+            DataFrame with DatetimeIndex and columns [open, high, low, close, volume].
+            Returns empty DataFrame on failure (never raises).
+        """
+        tradingview_limiter.wait()
+
+        # Symbol translation: strip .CA suffix for TradingView, use EGX exchange
+        tv_symbol = symbol.replace(".CA", "") if symbol.endswith(".CA") else symbol
+        tv_exchange = "EGX"
+
+        try:
+            tv = self._get_tv_client()
+            LOGGER.info(f"TradingView fetch: symbol={tv_symbol} exchange={tv_exchange} n_bars={n_bars}")
+
+            df = tv.get_hist(
+                symbol=tv_symbol,
+                exchange=tv_exchange,
+                interval=Interval.in_daily,
+                n_bars=n_bars,
+            )
+
+            if df is None or df.empty:
+                LOGGER.error(f"TradingView returned empty data for {symbol}")
+                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+            # Drop the 'symbol' column that TradingView includes
+            if "symbol" in df.columns:
+                df = df.drop(columns=["symbol"])
+
+            # Rename columns to match internal pipeline schema (lowercase)
+            # TradingView returns: open, high, low, close, volume (already lowercase)
+            column_map = {
+                "open": "open",
+                "high": "high",
+                "low": "low",
+                "close": "close",
+                "volume": "volume",
+            }
+            df = df.rename(columns={k: v for k, v in column_map.items() if k in df.columns})
+
+            # Ensure DatetimeIndex is timezone-naive
+            if isinstance(df.index, pd.DatetimeIndex):
+                if df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+            else:
+                df.index = pd.to_datetime(df.index, errors="coerce")
+                if df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+
+            df = df.sort_index()
+
+            # Filter to requested date range
+            if start_date is not None:
+                start_ts = pd.Timestamp(start_date)
+                df = df.loc[df.index >= start_ts]
+            if end_date is not None:
+                end_ts = pd.Timestamp(end_date)
+                df = df.loc[df.index <= end_ts]
+
+            LOGGER.info(
+                f"TradingView fetched {len(df)} bars for {symbol} "
+                f"({df.index.min().date() if len(df) else 'N/A'} to {df.index.max().date() if len(df) else 'N/A'})"
+            )
+            return df[["open", "high", "low", "close", "volume"]]
+
+        except Exception as e:
+            LOGGER.error(f"TradingView fetch failed for {symbol}: {e}")
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    def _fetch_tradingview_egx(
+        self,
+        symbol: str,
+        from_date: date,
+        to_date: date,
+    ) -> FetchResult:
+        """
+        Fetch EGX stock from TradingView, returning a FetchResult compatible
+        with the fallback chain.
+
+        Args:
+            symbol: Internal EGX symbol (e.g. 'COMI.CA')
+            from_date: Start date
+            to_date: End date
+
+        Returns:
+            FetchResult with OHLCV data
+        """
+        try:
+            df = self.fetch_symbol_data_tradingview(
+                symbol=symbol,
+                start_date=from_date,
+                end_date=to_date,
+            )
+
+            if df.empty:
+                return FetchResult(
+                    success=False, data=None, source="tradingview",
+                    error_message=f"No TradingView data for {symbol}",
+                )
+
+            # Convert to FetchResult schema: trade_date column + lowercase OHLCV
+            df = df.reset_index()
+            date_col = df.columns[0]  # The former DatetimeIndex, usually 'datetime'
+            df = df.rename(columns={date_col: "trade_date"})
+
+            return FetchResult(
+                success=True, data=df, source="tradingview", rows_fetched=len(df),
+            )
+
+        except Exception as e:
+            return FetchResult(
+                success=False, data=None, source="tradingview",
+                error_message=f"TradingView error: {e}",
+            )
 
     # ==================== Alpha Vantage Methods ====================
 
@@ -917,8 +1066,8 @@ class DataFetcher:
     def fetch_egx_stock(self, symbol: str, days: int = 30) -> FetchResult:
         """
         Fetch EGX stock with fallback chain.
-        Primary: EODHD (via GDR listings like CBKD.LSE)
-        Fallback: Investing.com, yfinance
+        Primary: TradingView (direct EGX exchange data)
+        Fallback: EODHD (GDR listings), Investing.com, yfinance
         """
         to_date = date.today()
         from_date = to_date - timedelta(days=days)
@@ -926,17 +1075,43 @@ class DataFetcher:
         return self.fetch_with_fallback(
             f"EGX stock {symbol}",
             [
+                lambda: self._fetch_tradingview_egx(symbol, from_date, to_date),
                 lambda: self.fetch_eodhd_egx_stock(symbol, from_date, to_date),
                 lambda: self.fetch_investing_egx_stock(symbol, from_date, to_date),
                 lambda: self._fetch_yfinance_egx(symbol, from_date, to_date),
             ],
         )
 
+    def _fetch_tradingview_brent(self, from_date: date, to_date: date) -> FetchResult:
+        """Fetch Brent Crude from TradingView (ICE exchange)."""
+        try:
+            tradingview_limiter.wait()
+            tv = self._get_tv_client()
+            df = tv.get_hist(symbol="BZ1!", exchange="ICE", interval=Interval.in_daily, n_bars=5000)
+            if df is None or df.empty:
+                return FetchResult(success=False, data=None, source="tradingview",
+                                   error_message="No TradingView Brent data")
+            if "symbol" in df.columns:
+                df = df.drop(columns=["symbol"])
+            if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+            df = df.sort_index()
+            if from_date:
+                df = df.loc[df.index >= pd.Timestamp(from_date)]
+            if to_date:
+                df = df.loc[df.index <= pd.Timestamp(to_date)]
+            df = df.reset_index()
+            df = df.rename(columns={df.columns[0]: "trade_date"})
+            return FetchResult(success=True, data=df, source="tradingview", rows_fetched=len(df))
+        except Exception as e:
+            return FetchResult(success=False, data=None, source="tradingview",
+                               error_message=f"TradingView Brent error: {e}")
+
     def fetch_brent_crude(self, days: int = 30) -> FetchResult:
         """
         Fetch Brent Crude with fallback chain.
-        Primary: EODHD (via BNO ETF)
-        Fallback: FMP, yfinance, Investing.com
+        Primary: TradingView (ICE exchange)
+        Fallback: EODHD (BNO ETF), FMP, yfinance, Investing.com
         """
         to_date = date.today()
         from_date = to_date - timedelta(days=days)
@@ -944,6 +1119,7 @@ class DataFetcher:
         return self.fetch_with_fallback(
             "Brent Crude",
             [
+                lambda: self._fetch_tradingview_brent(from_date, to_date),
                 lambda: self.fetch_eodhd_brent_crude(from_date, to_date),
                 lambda: self.fetch_fmp_historical("BZ=F", from_date, to_date),
                 lambda: self._fetch_yfinance("BZ=F", from_date, to_date),
@@ -964,14 +1140,42 @@ class DataFetcher:
             ],
         )
 
+    def _fetch_tradingview_usd_egp(self, from_date: date, to_date: date) -> FetchResult:
+        """Fetch USD/EGP from TradingView."""
+        try:
+            tradingview_limiter.wait()
+            tv = self._get_tv_client()
+            df = tv.get_hist(symbol="USDEGP", exchange="FX", interval=Interval.in_daily, n_bars=5000)
+            if df is None or df.empty:
+                return FetchResult(success=False, data=None, source="tradingview",
+                                   error_message="No TradingView USD/EGP data")
+            if "symbol" in df.columns:
+                df = df.drop(columns=["symbol"])
+            if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+            df = df.sort_index()
+            if from_date:
+                df = df.loc[df.index >= pd.Timestamp(from_date)]
+            if to_date:
+                df = df.loc[df.index <= pd.Timestamp(to_date)]
+            df = df.reset_index()
+            df = df.rename(columns={df.columns[0]: "trade_date"})
+            return FetchResult(success=True, data=df, source="tradingview", rows_fetched=len(df))
+        except Exception as e:
+            return FetchResult(success=False, data=None, source="tradingview",
+                               error_message=f"TradingView USD/EGP error: {e}")
+
     def fetch_usd_egp(self, days: int = 30) -> FetchResult:
-        """Fetch USD/EGP rates with fallback chain."""
+        """Fetch USD/EGP rates with fallback chain.
+        Primary: TradingView, Fallback: Alpha Vantage, yfinance
+        """
         to_date = date.today()
         from_date = to_date - timedelta(days=days)
 
         return self.fetch_with_fallback(
             "USD/EGP",
             [
+                lambda: self._fetch_tradingview_usd_egp(from_date, to_date),
                 lambda: self.fetch_alpha_vantage_fx_daily("USD", "EGP"),
                 lambda: self._fetch_yfinance("EGP=X", from_date, to_date),
             ],

@@ -14,11 +14,13 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import { fetchStopRules } from "@/lib/api";
 import { useMemo } from "react";
-import { Info } from "lucide-react";
+import { Info, Lock } from "lucide-react";
+import { Link } from "react-router-dom";
 import type { StopRule } from "@/types/api";
 
 export function MarketWatchPage() {
-  const { isPremium } = useAuth();
+  const { isPremium, isPro } = useAuth();
+  const isFreeUser = !isPro; // Show FOMO UI for non-pro users
 
   const rulesQuery = useQuery({
     queryKey: ["market-watch-rules"],
@@ -26,21 +28,16 @@ export function MarketWatchPage() {
     enabled: isPremium,
   });
 
-  if (!isPremium) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Premium Feature</CardTitle>
-          <CardDescription>
-            Market Watch is available only for PREMIUM users.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Badge variant="warning">Upgrade required</Badge>
-        </CardContent>
-      </Card>
-    );
-  }
+  // FOMO: Sample data for free users (shows blur effect on premium columns)
+  const sampleData = useMemo(
+    () => [
+      { id: 1, symbol: "COMI.CA", confidenceScore: 0.85, predictedReturn5d: 0.042, action: "BUY" },
+      { id: 2, symbol: "HRHO.CA", confidenceScore: 0.72, predictedReturn5d: 0.031, action: "HOLD" },
+      { id: 3, symbol: "SWDY.CA", confidenceScore: 0.91, predictedReturn5d: 0.058, action: "BUY" },
+    ],
+    [],
+  );
+
 
   // Market Watch: Display enriched Stop Rules with AI Market Radar signals
   // The backend now returns enriched StopRule objects with symbol, confidenceScore,
@@ -72,14 +69,35 @@ export function MarketWatchPage() {
             Monitor active stop-loss and take-profit guardrails. Now with explainable AI insights.
           </p>
         </div>
-        <Button variant="outline" onClick={() => rulesQuery.refetch()}>
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          {isFreeUser && (
+            <Button asChild className="bg-amber-500 hover:bg-amber-600 text-white">
+              <Link to="/upgrade">
+                <Lock className="mr-2 h-4 w-4" />
+                Upgrade to Pro
+              </Link>
+            </Button>
+          )}
+          <Button variant="outline" onClick={() => rulesQuery.refetch()} disabled={isFreeUser}>
+            Refresh
+          </Button>
+        </div>
       </section>
       <Card>
         <CardHeader>
-          <CardTitle>Active Stop Rules & AI Insights</CardTitle>
-          <CardDescription>Live XAI metrics and guardrails from backend</CardDescription>
+          <CardTitle>
+            Active Stop Rules & AI Insights
+            {isFreeUser && (
+              <Badge variant="warning" className="ml-2 align-middle">
+                PRO Preview
+              </Badge>
+            )}
+          </CardTitle>
+          <CardDescription>
+            {isFreeUser
+              ? "Sample preview of AI-powered market insights. Upgrade to unlock full data."
+              : "Live XAI metrics and guardrails from backend"}
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {rulesQuery.isLoading ? (
@@ -99,57 +117,111 @@ export function MarketWatchPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {recommendations.length ? (
-                  recommendations.map((rec, idx) => {
-                    const confidence = rec.confidenceScore ?? 0;
-                    const isHighConfidence = confidence > 0.6;
-                    const badgeVariant = isHighConfidence ? "success" : "warning";
-                    const action = rec.action || "HOLD";
-                    const actionColor = action === "BUY" ? "success" : action === "HOLD" ? "secondary" : "warning";
-                    return (
-                      <TableRow key={rec.id || idx}>
-                        <TableCell className="font-medium">{rec.symbol || "-"}</TableCell>
-                        <TableCell>
-                          {rec.confidenceScore !== undefined ? (
-                            <Badge variant={badgeVariant}>{(confidence * 100).toFixed(2)}%</Badge>
-                          ) : (
-                            <span>-</span>
-                          )}
+                {isFreeUser
+                  ? // FOMO: Sample data for free users with blur effect on premium columns
+                    sampleData.map((rec) => (
+                      <TableRow key={rec.id}>
+                        <TableCell className="font-medium">{rec.symbol}</TableCell>
+                        {/* Blurred premium columns with lock overlay */}
+                        <TableCell className="relative">
+                          <div className="blur-sm select-none">
+                            <Badge variant="success">{(rec.confidenceScore * 100).toFixed(2)}%</Badge>
+                          </div>
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <Lock className="h-4 w-4 text-amber-500" />
+                          </div>
                         </TableCell>
-                        <TableCell>
-                          {typeof rec.predictedReturn5d === "number"
-                            ? `${(rec.predictedReturn5d * 100).toFixed(2)}%`
-                            : "-"}
+                        <TableCell className="relative">
+                          <div className="blur-sm select-none">
+                            {(rec.predictedReturn5d * 100).toFixed(2)}%
+                          </div>
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <Lock className="h-4 w-4 text-amber-500" />
+                          </div>
                         </TableCell>
-                        <TableCell>
-                          <Badge variant={actionColor}>{action}</Badge>
+                        <TableCell className="relative">
+                          <div className="blur-sm select-none">
+                            <Badge variant={rec.action === "BUY" ? "success" : "warning"}>
+                              {rec.action}
+                            </Badge>
+                          </div>
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <Lock className="h-4 w-4 text-amber-500" />
+                          </div>
                         </TableCell>
-                        <TableCell>
-                          {rec.xaiReasons?.[0] || "No explainability reasons available."}
+                        <TableCell className="relative">
+                          <div className="blur-sm select-none max-w-[150px]">
+                            AI analysis unavailable in preview mode
+                          </div>
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <Lock className="h-4 w-4 text-amber-500" />
+                          </div>
                         </TableCell>
-                        <TableCell>
-                          {typeof rec.stopLossPct === "number"
-                            ? `${(rec.stopLossPct * 100).toFixed(2)}%`
-                            : "-"}
-                        </TableCell>
-                        <TableCell>
-                          {typeof rec.takeProfitPct === "number"
-                            ? `${(rec.takeProfitPct * 100).toFixed(2)}%`
-                            : "-"}
-                        </TableCell>
-                        <TableCell>{rec.status || (rec.isActive ? "ACTIVE" : "-")}</TableCell>
+                        <TableCell>-</TableCell>
+                        <TableCell>-</TableCell>
+                        <TableCell>-</TableCell>
                       </TableRow>
-                    );
-                  })
-                ) : (
-                  <TableRow>
-                    <TableCell colSpan={8} className="text-center text-muted-foreground">
-                      No stop rules found.
-                    </TableCell>
-                  </TableRow>
-                )}
+                    ))
+                  : recommendations.length
+                    ? recommendations.map((rec, idx) => {
+                        const confidence = rec.confidenceScore ?? 0;
+                        const isHighConfidence = confidence > 0.6;
+                        const badgeVariant = isHighConfidence ? "success" : "warning";
+                        const action = rec.action || "HOLD";
+                        const actionColor = action === "BUY" ? "success" : action === "HOLD" ? "secondary" : "warning";
+                        return (
+                          <TableRow key={rec.id || idx}>
+                            <TableCell className="font-medium">{rec.symbol || "-"}</TableCell>
+                            <TableCell>
+                              {rec.confidenceScore !== undefined ? (
+                                <Badge variant={badgeVariant}>{(confidence * 100).toFixed(2)}%</Badge>
+                              ) : (
+                                <span>-</span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {typeof rec.predictedReturn5d === "number"
+                                ? `${(rec.predictedReturn5d * 100).toFixed(2)}%`
+                                : "-"}
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant={actionColor}>{action}</Badge>
+                            </TableCell>
+                            <TableCell>
+                              {rec.xaiReasons?.[0] || "No explainability reasons available."}
+                            </TableCell>
+                            <TableCell>
+                              {typeof rec.stopLossPct === "number"
+                                ? `${(rec.stopLossPct * 100).toFixed(2)}%`
+                                : "-"}
+                            </TableCell>
+                            <TableCell>
+                              {typeof rec.takeProfitPct === "number"
+                                ? `${(rec.takeProfitPct * 100).toFixed(2)}%`
+                                : "-"}
+                            </TableCell>
+                            <TableCell>{rec.status || (rec.isActive ? "ACTIVE" : "-")}</TableCell>
+                          </TableRow>
+                        );
+                      })
+                    : (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center text-muted-foreground">
+                          No stop rules found.
+                        </TableCell>
+                      </TableRow>
+                    )}
               </TableBody>
             </Table>
+          )}
+          {isFreeUser && (
+            <div className="mt-4 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Lock className="h-4 w-4" />
+              <span>Upgrade to PRO to unlock real-time AI insights and stop-loss guardrails.</span>
+              <Link to="/upgrade" className="text-amber-600 hover:underline font-medium">
+                Learn more
+              </Link>
+            </div>
           )}
         </CardContent>
       </Card>

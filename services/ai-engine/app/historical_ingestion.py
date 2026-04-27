@@ -21,18 +21,19 @@ DEFAULT_YEARS = 10
 def ingest_historical_market_data_to_core(years: int = DEFAULT_YEARS) -> dict[str, Any]:
     payload, stats, warnings = fetch_historical_data(years=years)
     source = str(stats.get("source") or "local-csv")
+    provider = "tradingview" if source == "tradingview" else "local-csv"
 
     if not payload:
         return {
             "status": "FAILED",
             "source": source,
-            "provider": "local-csv",
+            "provider": provider,
             "years": years,
             "symbolsRequested": stats.get("symbolsRequested", 0),
             "symbolsWithData": stats.get("symbolsWithData", 0),
             "rowsPrepared": 0,
             "rowsSynced": 0,
-            "warnings": warnings + ["No historical CSV rows were prepared for ingestion"],
+            "warnings": warnings + ["No historical rows were prepared for ingestion"],
         }
 
     core_base_url = os.getenv("CORE_BACKEND_URL", DEFAULT_CORE_BACKEND_URL).rstrip("/")
@@ -61,7 +62,7 @@ def ingest_historical_market_data_to_core(years: int = DEFAULT_YEARS) -> dict[st
     return {
         "status": "SUCCESS",
         "source": source,
-        "provider": "local-csv",
+        "provider": provider,
         "years": years,
         "symbolsRequested": stats.get("symbolsRequested", 0),
         "symbolsWithData": stats.get("symbolsWithData", 0),

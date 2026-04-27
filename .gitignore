@@ -8,3 +8,5 @@ services/api-gateway/target
 *.pyc
 services/core-backend/target
 services/api-gateway/target
+services/ai-engine/models
+infra

@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 import org.springframework.http.HttpMethod;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -27,6 +28,7 @@ import com.egx.core.security.SecurityRateLimitingFilter;
 
 @Configuration
 @EnableWebSecurity
+@EnableMethodSecurity(prePostEnabled = true)
 public class SecurityConfig {
 
     private final boolean forceHttps;
@@ -112,13 +114,13 @@ public class SecurityConfig {
                     // User profile and session endpoints must always be authenticated.
                     auth.requestMatchers("/users/**", "/api/core/users/**").authenticated();
 
-                    // Premium-only API surface.
+                    // Premium-only API surface (PRO and ADMIN roles).
                     auth.requestMatchers(
                             "/premium/**",
                             "/api/core/premium/**",
                             "/ai/performance-summary",
                             "/api/core/ai/performance-summary"
-                    ).hasRole("PREMIUM");
+                    ).hasAnyRole("PRO", "ADMIN");
 
                     // Admin-only API surface.
                     auth.requestMatchers("/admin/**", "/api/core/admin/**").hasRole("ADMIN");

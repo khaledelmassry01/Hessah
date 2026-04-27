@@ -103,11 +103,29 @@ def chunk_date_range(start: date, end: date, chunk_days: int) -> list[tuple[date
 
 def fetch_brent_with_fallback(fetcher: DataFetcher, start: date, end: date) -> pd.DataFrame | None:
     """
-    Fetch Brent Crude using yfinance (primary source).
-    BZ=F is the Brent Crude Oil Futures ticker on Yahoo Finance.
+    Fetch Brent Crude with fallback chain.
+    Primary: TradingView (ICE exchange)
+    Fallback: yfinance (BZ=F)
     """
     LOGGER.info(f"Fetching Brent Crude from {start} to {end}")
 
+    # Try TradingView first
+    try:
+        result = fetcher._fetch_tradingview_brent(start, end)
+        if result.success and result.data is not None and not result.data.empty:
+            df = result.data.copy()
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+            df = df[["trade_date"] + [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]]
+            df = df.rename(columns={"close": "price"})
+            df["commodity_name"] = "Brent Crude"
+            df["source"] = "tradingview"
+            df = df[["trade_date", "commodity_name", "price", "source"]]
+            LOGGER.info(f"Fetched {len(df)} Brent records from TradingView")
+            return df
+    except Exception as e:
+        LOGGER.warning(f"TradingView failed for Brent: {e}")
+
+    # Fallback to yfinance
     try:
         import yfinance as yf
         ticker = yf.Ticker("BZ=F")
@@ -164,15 +182,29 @@ def generate_urea_from_brent(brent_df: pd.DataFrame, baseline: float = 180.0) ->
 def fetch_usd_egp_with_fallback(fetcher: DataFetcher, start: date, end: date) -> pd.DataFrame | None:
     """
     Fetch USD/EGP with fallback chain.
-    Sources: Alpha Vantage -> yfinance
+    Primary: TradingView (FX exchange)
+    Fallback: Alpha Vantage -> yfinance
     """
     LOGGER.info(f"Fetching USD/EGP from {start} to {end}")
 
-    # Try Alpha Vantage first
+    # Try TradingView first
+    try:
+        result = fetcher._fetch_tradingview_usd_egp(start, end)
+        if result.success and result.data is not None and not result.data.empty:
+            df = result.data.copy()
+            df = df.rename(columns={"close": "usd_egp_close"})
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+            df["source"] = "tradingview"
+            df = df[["trade_date", "usd_egp_close", "source"]]
+            LOGGER.info(f"Fetched {len(df)} USD/EGP records from TradingView")
+            return df
+    except Exception as e:
+        LOGGER.warning(f"TradingView failed for USD/EGP: {e}")
+
+    # Try Alpha Vantage
     result = fetcher.fetch_alpha_vantage_fx_daily("USD", "EGP")
     if result.success and result.data is not None:
         df = result.data.copy()
-        # Filter to date range
         df = df[(df["trade_date"] >= pd.Timestamp(start)) & (df["trade_date"] <= pd.Timestamp(end))]
         if not df.empty:
             df["source"] = "alpha_vantage"

@@ -19,6 +19,7 @@ from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import DMatrix, XGBRegressor, XGBClassifier
+import xgboost as xgb
 
 from .feature_engineering import (
     FEATURE_COLUMNS,
@@ -98,7 +99,7 @@ def _get_optimized_xgboost_params(
     x_train: pd.DataFrame,
     y_train: pd.Series,
     sample_weight: np.ndarray | None,
-    n_iter: int = 8,
+    n_iter: int = 4,
     cv_folds: int = 3,
 ) -> dict[str, Any]:
     """
@@ -112,18 +113,37 @@ def _get_optimized_xgboost_params(
     }
 
     # Use fewer estimators for HPO to keep it fast
-    base_model = XGBClassifier(
-        objective="multi:softprob",
-        num_class=3,
-        eval_metric='mlogloss',
-        n_estimators=200,  # Fewer trees for HPO speed
-        min_child_weight=2,
-        subsample=0.90,
-        colsample_bytree=0.90,
-        reg_lambda=1.0,
-        random_state=42,
-        n_jobs=2,
-    )
+    # Try GPU first, fallback to CPU if CUDA not available
+    try:
+        base_model = XGBClassifier(
+            objective="multi:softprob",
+            num_class=3,
+            eval_metric='mlogloss',
+            n_estimators=100,  # Minimal trees for HPO speed, prevents GPU OOM
+            min_child_weight=2,
+            subsample=0.90,
+            colsample_bytree=0.90,
+            reg_lambda=1.0,
+            random_state=42,
+            n_jobs=2,
+            tree_method="hist",
+            device="cuda",
+        )
+    except xgb.core.XGBoostError:
+        LOGGER.warning("GPU not available for HPO base model, falling back to CPU")
+        base_model = XGBClassifier(
+            objective="multi:softprob",
+            num_class=3,
+            eval_metric='mlogloss',
+            n_estimators=100,  # Minimal trees for HPO speed, prevents GPU OOM
+            min_child_weight=2,
+            subsample=0.90,
+            colsample_bytree=0.90,
+            reg_lambda=1.0,
+            random_state=42,
+            n_jobs=2,
+            device="cpu",
+        )
 
     try:
         search = RandomizedSearchCV(
@@ -137,7 +157,7 @@ def _get_optimized_xgboost_params(
             verbose=0,
         )
 
-        search.fit(x_train, y_train, sample_weight=sample_weight)
+        search.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=sample_weight)
         best_params = search.best_params_
 
         LOGGER.debug(
@@ -452,6 +472,8 @@ def train_xgboost_models(
                     reg_lambda=1.0,
                     random_state=42 + fold,
                     n_jobs=2,
+                    tree_method="hist",
+                    device="cuda",
                 )
 
                 fold_sample_weight = None
@@ -467,30 +489,51 @@ def train_xgboost_models(
                 else:
                     fold_combined_weights = fold_balanced_weights
 
-                fold_model.fit(x_fold_train, y_fold_train, sample_weight=fold_combined_weights)
-                fold_pred = fold_model.predict(x_fold_val)
+                fold_model.fit(x_fold_train.to_numpy(), y_fold_train.to_numpy(), sample_weight=fold_combined_weights)
+                fold_pred = fold_model.predict(x_fold_val.to_numpy())
                 fold_acc = sklearn.metrics.accuracy_score(y_fold_val, fold_pred)
                 cv_scores.append(fold_acc)
 
             # Final model on full training data with optimized hyperparameters
-            model = XGBClassifier(
-                objective="multi:softprob",
-                num_class=3,
-                eval_metric='mlogloss',
-                n_estimators=resolved_n_estimators,
-                learning_rate=best_learning_rate,
-                max_depth=best_max_depth,
-                min_child_weight=2,
-                subsample=0.90,
-                colsample_bytree=0.90,
-                reg_lambda=1.0,
-                random_state=42,
-                n_jobs=2,
-            )
-            model.fit(x_train, y_train_int, sample_weight=combined_weights)
+            try:
+                model = XGBClassifier(
+                    objective="multi:softprob",
+                    num_class=3,
+                    eval_metric='mlogloss',
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=best_learning_rate,
+                    max_depth=best_max_depth,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    tree_method="hist",
+                    device="cuda",
+                )
+                model.fit(x_train.to_numpy(), y_train_int.to_numpy(), sample_weight=combined_weights)
+            except xgb.core.XGBoostError:
+                LOGGER.warning("GPU not available for final model, falling back to CPU")
+                model = XGBClassifier(
+                    objective="multi:softprob",
+                    num_class=3,
+                    eval_metric='mlogloss',
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=best_learning_rate,
+                    max_depth=best_max_depth,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    device="cpu",
+                )
+                model.fit(x_train.to_numpy(), y_train_int.to_numpy(), sample_weight=combined_weights)
 
             # Validation predictions - get probabilities and predicted classes
-            y_pred_proba = model.predict_proba(x_val)
+            y_pred_proba = model.predict_proba(x_val.to_numpy())
             y_pred = np.argmax(y_pred_proba, axis=1)
 
             # Compute classification metrics
@@ -503,22 +546,41 @@ def train_xgboost_models(
 
         else:
             # Regression Mode (original logic)
-            model = XGBRegressor(
-                objective="reg:squarederror",
-                n_estimators=resolved_n_estimators,
-                learning_rate=resolved_learning_rate,
-                max_depth=4,
-                min_child_weight=2,
-                subsample=0.90,
-                colsample_bytree=0.90,
-                reg_lambda=1.0,
-                random_state=42,
-                n_jobs=2,
-            )
-            model.fit(x_train, y_train, sample_weight=train_sample_weight)
+            try:
+                model = XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=resolved_learning_rate,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    tree_method="hist",
+                    device="cuda",
+                )
+                model.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=train_sample_weight)
+            except xgb.core.XGBoostError:
+                LOGGER.warning("GPU not available for regression model, falling back to CPU")
+                model = XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=resolved_learning_rate,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    device="cpu",
+                )
+                model.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=train_sample_weight)
 
             y_true = y_val.to_numpy(dtype=float)
-            y_pred = model.predict(x_val).astype(float)
+            y_pred = model.predict(x_val.to_numpy()).astype(float)
 
             rmse = float(np.sqrt(_mse(y_true, y_pred)))
             mae = _mae(y_true, y_pred)
@@ -550,21 +612,42 @@ def train_xgboost_models(
             final_max_depth = int(final_optimized_params["max_depth"])
             final_learning_rate = float(final_optimized_params["learning_rate"])
 
-            final_model = XGBClassifier(
-                objective="multi:softprob",
-                num_class=3,
-                eval_metric='mlogloss',
-                n_estimators=resolved_n_estimators,
-                learning_rate=final_learning_rate,
-                max_depth=final_max_depth,
-                min_child_weight=2,
-                subsample=0.90,
-                colsample_bytree=0.90,
-                reg_lambda=1.0,
-                random_state=42,
-                n_jobs=2,
-            )
-            final_model.fit(x_fit, y_fit_int, sample_weight=fit_sample_weight)
+            try:
+                final_model = XGBClassifier(
+                    objective="multi:softprob",
+                    num_class=3,
+                    eval_metric='mlogloss',
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=final_learning_rate,
+                    max_depth=final_max_depth,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    tree_method="hist",
+                    device="cuda",
+                )
+                final_model.fit(x_fit.to_numpy(), y_fit_int.to_numpy(), sample_weight=fit_sample_weight)
+            except xgb.core.XGBoostError:
+                LOGGER.warning("GPU not available for final classification model, falling back to CPU")
+                final_model = XGBClassifier(
+                    objective="multi:softprob",
+                    num_class=3,
+                    eval_metric='mlogloss',
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=final_learning_rate,
+                    max_depth=final_max_depth,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    device="cpu",
+                )
+                final_model.fit(x_fit.to_numpy(), y_fit_int.to_numpy(), sample_weight=fit_sample_weight)
 
             # Build metrics dict for classification
             metrics_dict = {
@@ -579,19 +662,38 @@ def train_xgboost_models(
                 "fitRows": int(len(fit_slice)),
             }
         else:
-            final_model = XGBRegressor(
-                objective="reg:squarederror",
-                n_estimators=resolved_n_estimators,
-                learning_rate=resolved_learning_rate,
-                max_depth=4,
-                min_child_weight=2,
-                subsample=0.90,
-                colsample_bytree=0.90,
-                reg_lambda=1.0,
-                random_state=42,
-                n_jobs=2,
-            )
-            final_model.fit(x_fit, y_fit, sample_weight=fit_sample_weight)
+            try:
+                final_model = XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=resolved_learning_rate,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    tree_method="hist",
+                    device="cuda",
+                )
+                final_model.fit(x_fit.to_numpy(), y_fit.to_numpy(), sample_weight=fit_sample_weight)
+            except xgb.core.XGBoostError:
+                LOGGER.warning("GPU not available for final regression model, falling back to CPU")
+                final_model = XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=resolved_n_estimators,
+                    learning_rate=resolved_learning_rate,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.90,
+                    colsample_bytree=0.90,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    n_jobs=2,
+                    device="cpu",
+                )
+                final_model.fit(x_fit.to_numpy(), y_fit.to_numpy(), sample_weight=fit_sample_weight)
 
             metrics_dict = {
                 "rmse": rmse,
@@ -616,6 +718,12 @@ def train_xgboost_models(
         model_path = _model_path_for_symbol(model_root, symbol, resolved_target_mode)
         with model_path.open("wb") as model_file:
             pickle.dump(payload, model_file)
+        # Verify persistence and log success
+        if model_path.exists():
+            file_size = model_path.stat().st_size
+            LOGGER.info("Model persisted: %s (%d bytes)", model_path, file_size)
+        else:
+            LOGGER.error("Model file not found after save: %s", model_path)
         trained_models += 1
 
         symbol_metrics[symbol] = {
@@ -665,6 +773,11 @@ def train_xgboost_models(
 
     manifest_path = _manifest_path(model_root)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    # Verify manifest persistence
+    if manifest_path.exists():
+        LOGGER.info("Manifest persisted: %s (%d symbols)", manifest_path, trained_models)
+    else:
+        LOGGER.error("Manifest file not found after save: %s", manifest_path)
 
     # Clear in-memory model cache after new artifacts are persisted.
     with _MODEL_CACHE_LOCK:
@@ -824,7 +937,7 @@ def predict_symbol_forecasts(
             warnings.append(f"Feature row contains NaN values for {symbol}; forecast skipped")
             continue
 
-        predicted_raw = float(model.predict(x_row)[0])
+        predicted_raw = float(model.predict(x_row.to_numpy())[0])
         current_close = _safe_float(latest_row.get("close_price"), 0.0)
         if current_close <= 0:
             warnings.append(f"Current close price is missing/invalid for {symbol}; forecast skipped")
@@ -833,7 +946,7 @@ def predict_symbol_forecasts(
         # Handle Classification vs Regression prediction logic
         if isinstance(model, XGBClassifier):
             # Classification Mode: Get class probabilities and predicted class
-            class_proba = model.predict_proba(x_row)[0]  # Shape: (3,) for classes [0, 1, 2]
+            class_proba = model.predict_proba(x_row.to_numpy())[0]  # Shape: (3,) for classes [0, 1, 2]
             predicted_class = int(np.argmax(class_proba))
             predicted_class_proba = float(class_proba[predicted_class])
 

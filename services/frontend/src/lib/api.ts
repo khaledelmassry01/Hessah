@@ -136,6 +136,10 @@ export function normalizeTokenPayload(
     toStringValue(source.subscriptionTier) ??
     "FREE";
 
+  const role =
+    toStringValue(source.role) ??
+    "USER";
+
   const accessToken =
     toStringValue(source.accessToken) ??
     toStringValue(source.access_token) ??
@@ -158,6 +162,7 @@ export function normalizeTokenPayload(
   return {
     userId,
     tier,
+    role,
     sessionId: toStringValue(source.sessionId) ?? toStringValue(source.session_id),
     accessToken,
     refreshToken,
@@ -620,6 +625,7 @@ export async function fetchCurrentUser(): Promise<UserProfile> {
     fullName: toStringValue(profile.fullName) || toStringValue(profile.full_name) || "",
     phone: toStringValue(profile.phone) ?? null,
     tier: toStringValue(profile.tier) || "FREE",
+    role: toStringValue(profile.role) ?? "USER",
     kycStatus: toStringValue(profile.kycStatus) || toStringValue(profile.kyc_status),
     accountStatus:
       toStringValue(profile.accountStatus) || toStringValue(profile.account_status),
@@ -641,6 +647,7 @@ export async function updateCurrentUser(payload: {
     fullName: toStringValue(profile.fullName) || "",
     phone: toStringValue(profile.phone) ?? null,
     tier: toStringValue(profile.tier) || "FREE",
+    role: toStringValue(profile.role) ?? "USER",
     kycStatus: toStringValue(profile.kycStatus),
     accountStatus: toStringValue(profile.accountStatus),
     createdAt: toStringValue(profile.createdAt),

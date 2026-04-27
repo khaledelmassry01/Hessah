@@ -6,6 +6,7 @@ import {
   LineChart,
   LogOut,
   Moon,
+  Shield,
   ShieldCheck,
   Sparkles,
   SunMedium,
@@ -54,14 +55,21 @@ const navItems: NavItem[] = [
 ];
 
 export function AppShell() {
-  const { user, logout } = useAuth();
+  const { user, logout, roles, isPro, isAdmin } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
 
-  const displayTier = useMemo(
-    () => (user?.tier ? user.tier.toUpperCase() : "FREE"),
-    [user?.tier],
-  );
+  // Display role badges based on all user roles
+  const getRoleBadgeVariant = (role: string) => {
+    switch (role) {
+      case "ADMIN":
+        return "success" as const;
+      case "PRO":
+        return "warning" as const;
+      default:
+        return "secondary" as const;
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_right,_hsl(var(--primary)/0.18),transparent_42%),radial-gradient(circle_at_bottom_left,_hsl(var(--accent)/0.16),transparent_36%)]">
@@ -107,6 +115,32 @@ export function AppShell() {
                 </NavLink>
               );
             })}
+
+            {isAdmin && (
+              <>
+                <div className="my-4 border-t border-border/70" />
+                <p className="mb-2 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                  Administration
+                </p>
+                <NavLink
+                  to="/admin/dashboard"
+                  className={cn(
+                    "flex items-center justify-between rounded-md px-3 py-2 text-sm font-medium transition",
+                    location.pathname.startsWith("/admin")
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Shield className="h-4 w-4" />
+                    Admin Dashboard
+                  </span>
+                  <Badge variant="success" className="px-2 py-0 text-[10px]">
+                    ADMIN
+                  </Badge>
+                </NavLink>
+              </>
+            )}
           </nav>
         </aside>
 
@@ -120,9 +154,12 @@ export function AppShell() {
             </div>
 
             <div className="flex items-center gap-2">
-              <Badge variant={displayTier === "PREMIUM" ? "success" : "secondary"}>
-                {displayTier}
-              </Badge>
+              {/* Show all user roles as badges */}
+              {roles.map((role) => (
+                <Badge key={role} variant={getRoleBadgeVariant(role)}>
+                  {role}
+                </Badge>
+              ))}
               <Button variant="outline" size="icon" onClick={toggleTheme}>
                 {theme === "dark" ? (
                   <SunMedium className="h-4 w-4" />

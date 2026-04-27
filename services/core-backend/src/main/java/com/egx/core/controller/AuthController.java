@@ -1,17 +1,5 @@
 package com.egx.core.controller;
 
-import com.egx.core.controller.dto.auth.AuthTokensResponse;
-import com.egx.core.controller.dto.auth.LoginRequest;
-import com.egx.core.controller.dto.auth.MessageResponse;
-import com.egx.core.controller.dto.auth.RefreshAccessTokenResponse;
-import com.egx.core.controller.dto.auth.RefreshRequest;
-import com.egx.core.controller.dto.auth.RegisterRequest;
-import com.egx.core.controller.dto.auth.RegisterResponse;
-import com.egx.core.security.AuthCookieService;
-import com.egx.core.service.AuthService;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.validation.annotation.Validated;
@@ -21,6 +9,20 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+
+import com.egx.core.controller.dto.auth.AuthTokensResponse;
+import com.egx.core.controller.dto.auth.LoginRequest;
+import com.egx.core.controller.dto.auth.MessageResponse;
+import com.egx.core.controller.dto.auth.RefreshAccessTokenResponse;
+import com.egx.core.controller.dto.auth.RefreshRequest;
+import com.egx.core.controller.dto.auth.RegisterRequest;
+import com.egx.core.controller.dto.auth.RegisterResponse;
+import com.egx.core.security.AuthCookieService;
+import com.egx.core.service.AuthService;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.validation.Valid;
 
 @RestController
 @RequestMapping("/auth")
@@ -46,11 +48,15 @@ public class AuthController {
                 )
         );
 
+        // Get primary role for backward compatibility (first role or USER)
+        String primaryRole = registeredUser.roles().isEmpty() ? "USER" : registeredUser.roles().get(0);
+
         return new RegisterResponse(
                 registeredUser.userId(),
                 registeredUser.email(),
                 registeredUser.fullName(),
                 registeredUser.tier().name(),
+                primaryRole,
                 "User registered successfully"
         );
     }
@@ -72,9 +78,13 @@ public class AuthController {
 
         authCookieService.setAuthCookies(httpResponse, tokens.tokenPair());
 
+        // Get primary role for backward compatibility (first role or USER)
+        String primaryRole = tokens.roles().isEmpty() ? "USER" : tokens.roles().get(0);
+
         return new AuthTokensResponse(
                 tokens.userId(),
                 tokens.tier().name(),
+                primaryRole,
                 tokens.accessToken(),
                 tokens.accessTokenExpiresAt(),
                 tokens.refreshToken(),
@@ -107,9 +117,13 @@ public class AuthController {
 
                 authCookieService.setAuthCookies(httpResponse, tokens.tokenPair());
 
+        // Get primary role for backward compatibility (first role or USER)
+        String primaryRole = tokens.roles().isEmpty() ? "USER" : tokens.roles().get(0);
+
         return new RefreshAccessTokenResponse(
                 tokens.userId(),
                 tokens.tier().name(),
+                primaryRole,
                 tokens.accessToken(),
                 tokens.accessTokenExpiresAt(),
                 tokens.refreshToken(),

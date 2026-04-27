@@ -18,6 +18,8 @@ from urllib import request as url_request
 import requests
 import yfinance as yf
 
+from tvDatafeed import TvDatafeed, Interval
+
 from .data_pipeline import DEFAULT_SECTOR_MAP, EGX30_SYMBOLS
 
 LOGGER = logging.getLogger(__name__)
@@ -207,6 +209,11 @@ def fetch_core_instrument_catalog(force_refresh: bool = False) -> dict[str, Any]
 def fetch_active_exchange_instruments() -> tuple[list[ExchangeInstrument], str, list[str]]:
     warnings: list[str] = []
 
+    # Try TradingView first (direct EGX exchange data)
+    tv_instruments = _discover_with_tradingview(warnings)
+    if tv_instruments:
+        return tv_instruments, "tradingview-egx30", warnings
+
     instruments = _discover_with_provider(warnings)
     if instruments:
         return instruments, "live-provider", warnings
@@ -217,6 +224,60 @@ def fetch_active_exchange_instruments() -> tuple[list[ExchangeInstrument], str, 
 
     warnings.append("Live provider discovery unavailable; CSV/hardcoded EGX30 fallback used")
     return _fallback_instruments(warnings), "fallback-egx30", warnings
+
+
+def _discover_with_tradingview(warnings: list[str]) -> list[ExchangeInstrument]:
+    """
+    Discover EGX instruments using TradingView by probing each EGX30 symbol.
+
+    TradingView has direct EGX exchange data, so this is more reliable
+    than yfinance which has been rate-limiting EGX data.
+    """
+    discovered: dict[str, ExchangeInstrument] = {}
+
+    try:
+        tv = TvDatafeed()
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"TradingView init failed: {exc}")
+        return []
+
+    for symbol in EGX30_SYMBOLS:
+        canonical_symbol = _normalize_symbol(symbol)
+        if canonical_symbol is None:
+            continue
+
+        # Strip .CA suffix for TradingView
+        tv_symbol = symbol.replace(".CA", "") if symbol.endswith(".CA") else symbol
+
+        try:
+            df = tv.get_hist(
+                symbol=tv_symbol,
+                exchange="EGX",
+                interval=Interval.in_daily,
+                n_bars=5,
+            )
+
+            if df is not None and not df.empty:
+                metadata = EGX30_FALLBACK_METADATA.get(canonical_symbol, {})
+                discovered[canonical_symbol] = ExchangeInstrument(
+                    symbol=canonical_symbol,
+                    name=str(
+                        metadata.get("name")
+                        or canonical_symbol
+                    )[:255],
+                    sector=_resolve_sector_name(canonical_symbol, None),
+                )
+                LOGGER.info("TradingView probe OK for symbol=%s (tv_symbol=%s)", canonical_symbol, tv_symbol)
+            else:
+                LOGGER.debug("TradingView no data for tv_symbol=%s", tv_symbol)
+
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"TradingView probe failed for {tv_symbol}: {exc}")
+
+        # Anti-ban throttling between symbol probes
+        time.sleep(1.5)
+
+    return sorted(discovered.values(), key=lambda item: item.symbol)
 
 
 def _discover_with_yfinance(warnings: list[str]) -> list[ExchangeInstrument]:

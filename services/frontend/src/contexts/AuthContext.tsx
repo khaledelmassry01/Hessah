@@ -28,6 +28,9 @@ type AuthContextValue = {
   isAuthenticated: boolean;
   isInitializing: boolean;
   isPremium: boolean;
+  isPro: boolean;
+  isAdmin: boolean;
+  roles: string[];
   login: (payload: LoginPayload) => Promise<void>;
   register: (payload: RegisterPayload) => Promise<void>;
   logout: () => Promise<void>;
@@ -55,11 +58,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(profile);
 
     if (profile.userId && profile.userId !== tokenBundle.userId) {
-      const nextTokens = { ...tokenBundle, userId: profile.userId, tier: profile.tier };
+      const nextTokens = { ...tokenBundle, userId: profile.userId, tier: profile.tier, role: profile.role };
       writeTokens(nextTokens);
       setTokens(nextTokens);
     } else if (profile.tier && profile.tier !== tokenBundle.tier) {
-      const nextTokens = { ...tokenBundle, tier: profile.tier };
+      const nextTokens = { ...tokenBundle, tier: profile.tier, role: profile.role };
       writeTokens(nextTokens);
       setTokens(nextTokens);
     }
@@ -75,6 +78,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ...currentTokens,
         userId: profile.userId || currentTokens.userId,
         tier: profile.tier || currentTokens.tier,
+        role: profile.role || currentTokens.role,
       };
       writeTokens(nextTokens);
       setTokens(nextTokens);
@@ -168,8 +172,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [clearAuthState]);
 
   const isAuthenticated = Boolean(user) || Boolean(tokens?.accessToken);
-  const tier = (user?.tier || tokens?.tier || "FREE").toUpperCase();
-  const isPremium = tier === "PREMIUM";
+  
+  // Parse comma-separated roles from JWT or user profile
+  const rolesString = (user?.role || tokens?.role || "USER").toUpperCase();
+  const roles = rolesString.split(",").map(r => r.trim()).filter(Boolean);
+  
+  // Helper functions for role checking
+  const isPro = roles.includes("PRO") || roles.includes("ADMIN");
+  const isAdmin = roles.includes("ADMIN");
+  const isPremium = isPro; // Backward compatibility
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -178,6 +189,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isAuthenticated,
       isInitializing,
       isPremium,
+      isPro,
+      isAdmin,
+      roles,
       login,
       register,
       logout,
@@ -189,6 +203,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isAuthenticated,
       isInitializing,
       isPremium,
+      isPro,
+      isAdmin,
+      roles,
       login,
       register,
       logout,

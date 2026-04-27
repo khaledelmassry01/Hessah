@@ -11,6 +11,7 @@ function isValidTokenBundle(value: unknown): value is AuthTokenBundle {
   return (
     typeof token.userId === "number" &&
     typeof token.tier === "string" &&
+    typeof token.role === "string" &&
     typeof token.accessToken === "string" &&
     typeof token.refreshToken === "string"
   );

@@ -42,6 +42,118 @@ def _normalize_symbol(symbol: str) -> str:
     return f"{normalized}.CA"[:16]
 
 
+def _ensure_daily_ai_signals_table(connection) -> None:
+    """Ensure daily_ai_signals table exists."""
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_ai_signals (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                symbol VARCHAR(16) NOT NULL,
+                stock_id BIGINT NULL,
+                signal_date DATE NOT NULL,
+                action VARCHAR(20) NOT NULL,
+                confidence_score DECIMAL(6,4) NULL,
+                predicted_return_5d DECIMAL(10,6) NULL,
+                model_version VARCHAR(64) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_daily_ai_signals_symbol_date (symbol, signal_date)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+
+
+def save_predictions_to_daily_signals(
+    signal_date: date,
+    recommendations: list[dict],
+    model_version: str = "xgb-egx30-v1",
+    settings: MysqlSettings | None = None,
+) -> int:
+    """Save AI predictions to daily_ai_signals table for MarketWatch.
+    
+    Args:
+        signal_date: The date for the signals
+        recommendations: List of recommendation dicts with 'symbol', 'action', 'confidence_score', and optional 'predicted_return_5d'
+        model_version: Model version string
+        settings: MySQL connection settings
+        
+    Returns:
+        Number of signals saved
+    """
+    if not recommendations:
+        return 0
+
+    from datetime import datetime
+
+    connection = open_mysql_connection(settings=settings)
+    try:
+        _ensure_daily_ai_signals_table(connection)
+
+        rows = []
+        now = datetime.now()
+        for rec in recommendations:
+            symbol = rec.get("symbol", "").upper().strip()
+            if not symbol:
+                continue
+            # Determine action from recommendation
+            action = rec.get("action", "HOLD")
+            confidence = rec.get("confidence_score", 0.0)
+            predicted_return_5d = rec.get("predicted_return_5d")
+            
+            rows.append(
+                (
+                    symbol,
+                    signal_date,
+                    action,
+                    float(confidence),
+                    float(predicted_return_5d) if predicted_return_5d is not None else None,
+                    model_version,
+                    now,
+                    now,
+                )
+            )
+
+        if not rows:
+            return 0
+
+        cursor = connection.cursor()
+        try:
+            cursor.executemany(
+                """
+                INSERT INTO daily_ai_signals (
+                    symbol,
+                    signal_date,
+                    action,
+                    confidence_score,
+                    predicted_return_5d,
+                    model_version,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    action = VALUES(action),
+                    confidence_score = VALUES(confidence_score),
+                    predicted_return_5d = VALUES(predicted_return_5d),
+                    model_version = VALUES(model_version),
+                    updated_at = VALUES(updated_at)
+                """,
+                rows,
+            )
+            connection.commit()
+        finally:
+            cursor.close()
+
+        return len(rows)
+    finally:
+        connection.close()
+
+
 def _ensure_prediction_audit_table(connection) -> None:
     cursor = connection.cursor()
     try:

@@ -1,17 +1,19 @@
 package com.egx.core.controller;
 
-import com.egx.core.service.MarketRadarService;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Map;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.Map;
+import com.egx.core.service.MarketRadarService;
 
 /**
  * Admin Radar Controller - Manual triggers for Market Radar operations.
@@ -28,6 +30,22 @@ public class AdminRadarController {
 
     public AdminRadarController(MarketRadarService marketRadarService) {
         this.marketRadarService = marketRadarService;
+    }
+
+    /**
+     * Admin health-check endpoint.
+     * Returns a simple OK response to verify ADMIN role access is working.
+     *
+     * Requires ADMIN role.
+     */
+    @GetMapping("/health")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Map<String, Object>> adminHealthCheck() {
+        return ResponseEntity.ok(Map.of(
+                "status", "OK",
+                "message", "Admin access verified",
+                "timestamp", LocalDateTime.now().format(DateTimeFormatter.ISO_DATE_TIME)
+        ));
     }
 
     /**

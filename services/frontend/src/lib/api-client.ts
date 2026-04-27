@@ -80,6 +80,10 @@ export function normalizeTokenPayload(
     toStringValue(source.subscriptionTier) ??
     "FREE";
 
+  const role =
+    toStringValue(source.role) ??
+    "USER";
+
   const accessToken =
     toStringValue(source.accessToken) ??
     toStringValue(source.access_token) ??
@@ -102,6 +106,7 @@ export function normalizeTokenPayload(
   return {
     userId,
     tier,
+    role,
     accessToken,
     refreshToken,
     accessTokenExpiresAt:

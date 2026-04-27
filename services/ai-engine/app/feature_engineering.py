@@ -108,6 +108,29 @@ def open_mysql_connection(settings: MysqlSettings | None = None):
     )
 
 
+def _read_sql_frame(
+    sql: str,
+    params: list[Any] | tuple[Any, ...] | None = None,
+    settings: MysqlSettings | None = None,
+) -> pd.DataFrame:
+    """Execute a SQL query and return the result as a DataFrame without pandas DBAPI warnings."""
+    connection = open_mysql_connection(settings=settings)
+    try:
+        cursor = connection.cursor(dictionary=True)
+        try:
+            cursor.execute(sql, params or [])
+            rows = cursor.fetchall()
+            columns = cursor.column_names or []
+        finally:
+            cursor.close()
+    finally:
+        connection.close()
+
+    if not rows:
+        return pd.DataFrame(columns=list(columns))
+    return pd.DataFrame(rows)
+
+
 def load_historical_market_data(
     symbols: list[str] | None = None,
     start_date: date | None = None,
@@ -145,11 +168,7 @@ def load_historical_market_data(
     query.append("ORDER BY symbol ASC, trade_date ASC")
     sql = "\n".join(query)
 
-    connection = open_mysql_connection(settings=settings)
-    try:
-        frame = pd.read_sql(sql=sql, con=connection, params=params)
-    finally:
-        connection.close()
+    frame = _read_sql_frame(sql=sql, params=params, settings=settings)
 
     if frame.empty:
         return frame
@@ -187,52 +206,50 @@ def load_market_context_data(
 
     query.append("ORDER BY trade_date ASC")
 
-    connection = open_mysql_connection(settings=settings)
+    resolved_settings = settings or resolve_mysql_settings()
     try:
+        frame = _read_sql_frame(sql="\n".join(query), params=params, settings=resolved_settings)
+
         try:
-            frame = pd.read_sql(sql="\n".join(query), con=connection, params=params)
-             
-            # Also fetch alternative data on port 3307
-            alt_conn = open_mysql_connection(settings=MysqlSettings(
-                host=settings.host if settings else DEFAULT_DB_HOST,
-                port=3306,
-                user=settings.user if settings else DEFAULT_DB_USER,
-                password=settings.password if settings else DEFAULT_DB_PASSWORD,
-                database=settings.database if settings else DEFAULT_DB_NAME
-            ))
-            
-            try:
-                urea = pd.read_sql("SELECT trade_date, price as alt_urea_price FROM daily_commodities WHERE commodity_name = 'Urea' AND trade_date >= %s", alt_conn, params=[start_date])
-                brent = pd.read_sql("SELECT trade_date, price as alt_brent_price FROM daily_commodities WHERE commodity_name = 'Brent Crude' AND trade_date >= %s", alt_conn, params=[start_date])
-                news = pd.read_sql("SELECT trade_date, market_sentiment_score as alt_news_sentiment_score FROM daily_market_sentiment WHERE trade_date >= %s", alt_conn, params=[start_date])
-                
-                urea["trade_date"] = pd.to_datetime(urea["trade_date"], errors="coerce")
-                brent["trade_date"] = pd.to_datetime(brent["trade_date"], errors="coerce")
-                news["trade_date"] = pd.to_datetime(news["trade_date"], errors="coerce")
-                frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-
-                frame = frame.merge(urea, on="trade_date", how="left")
-                frame = frame.merge(brent, on="trade_date", how="left")
-                frame = frame.merge(news, on="trade_date", how="left")
-            except Exception as alt_exc:
-                LOGGER.warning(f"Failed to fetch alternative data: {alt_exc}")
-                frame["alt_urea_price"] = np.nan
-                frame["alt_brent_price"] = np.nan
-                frame["alt_news_sentiment_score"] = np.nan
-            finally:
-                alt_conn.close()
-
-        except Exception as e:  # noqa: BLE001
-            LOGGER.warning(f"Failed pulling context data: {e}")
-            return pd.DataFrame(
-                columns=[
-                    "trade_date",
-                    "usd_egp_return",
-                    "gold_return",
-                ]
+            urea = _read_sql_frame(
+                sql="SELECT trade_date, price as alt_urea_price FROM daily_commodities WHERE commodity_name = 'Urea' AND trade_date >= %s",
+                params=[start_date],
+                settings=resolved_settings,
             )
-    finally:
-        connection.close()
+            brent = _read_sql_frame(
+                sql="SELECT trade_date, price as alt_brent_price FROM daily_commodities WHERE commodity_name = 'Brent Crude' AND trade_date >= %s",
+                params=[start_date],
+                settings=resolved_settings,
+            )
+            news = _read_sql_frame(
+                sql="SELECT trade_date, market_sentiment_score as alt_news_sentiment_score FROM daily_market_sentiment WHERE trade_date >= %s",
+                params=[start_date],
+                settings=resolved_settings,
+            )
+
+            urea["trade_date"] = pd.to_datetime(urea["trade_date"], errors="coerce")
+            brent["trade_date"] = pd.to_datetime(brent["trade_date"], errors="coerce")
+            news["trade_date"] = pd.to_datetime(news["trade_date"], errors="coerce")
+            frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+
+            frame = frame.merge(urea, on="trade_date", how="left")
+            frame = frame.merge(brent, on="trade_date", how="left")
+            frame = frame.merge(news, on="trade_date", how="left")
+        except Exception as alt_exc:
+            LOGGER.warning(f"Failed to fetch alternative data: {alt_exc}")
+            frame["alt_urea_price"] = np.nan
+            frame["alt_brent_price"] = np.nan
+            frame["alt_news_sentiment_score"] = np.nan
+
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning(f"Failed pulling context data: {e}")
+        return pd.DataFrame(
+            columns=[
+                "trade_date",
+                "usd_egp_return",
+                "gold_return",
+            ]
+        )
 
     if frame.empty:
         return pd.DataFrame(
@@ -278,11 +295,7 @@ def _load_sector_mapping(settings: MysqlSettings | None = None) -> dict[str, str
     SELECT UPPER(symbol) AS symbol, COALESCE(sector_code, 'UNMAPPED') AS sector_code
     FROM stock_instruments
     """
-    connection = open_mysql_connection(settings=settings)
-    try:
-        frame = pd.read_sql(sql=sql, con=connection)
-    finally:
-        connection.close()
+    frame = _read_sql_frame(sql=sql, settings=settings)
 
     if frame.empty:
         return {}
@@ -311,6 +324,12 @@ def add_contextual_features(raw_frame: pd.DataFrame, settings: MysqlSettings | N
 
     context = load_market_context_data(start_date=start_value, end_date=end_value, settings=settings)
     merged = local.merge(context, on="trade_date", how="left")
+    
+    # Ensure context columns exist (fill with 0 if context data unavailable)
+    for col in ["usd_egp_return", "gold_return", "cbe_policy_rate_pct", "cbe_rate_changed"]:
+        if col not in merged.columns:
+            merged[col] = 0.0 if col != "cbe_rate_changed" else 0
+    
     merged[["usd_egp_return", "gold_return", "cbe_policy_rate_pct"]] = merged[
         ["usd_egp_return", "gold_return", "cbe_policy_rate_pct"]
     ].ffill().bfill()
@@ -319,14 +338,14 @@ def add_contextual_features(raw_frame: pd.DataFrame, settings: MysqlSettings | N
     merged["cbe_policy_rate_pct"] = merged["cbe_policy_rate_pct"].fillna(0.0)
     merged["cbe_rate_changed"] = merged["cbe_rate_changed"].fillna(0).astype(int)
 
-    # Training-Serving Skew Fix: Add stock_usd_corr_20d (rolling correlation)
-    merged["stock_usd_corr_20d"] = (
-        merged.groupby("symbol", group_keys=False)
-        .apply(
-            lambda group: group["daily_return"].rolling(window=20, min_periods=10).corr(group["usd_egp_return"])
-        )
-        .reset_index(level=0, drop=True)
-    )
+    # Training-Serving Skew Fix: Add stock_usd_corr_20d (rolling correlation).
+    # Compute per symbol with explicit index alignment to avoid pandas apply shape drift.
+    stock_usd_corr = pd.Series(index=merged.index, dtype=float)
+    for _, group in merged.groupby("symbol", sort=False):
+        corr_values = group["daily_return"].rolling(window=20, min_periods=10).corr(group["usd_egp_return"])
+        stock_usd_corr.loc[group.index] = corr_values.to_numpy(dtype=float)
+
+    merged["stock_usd_corr_20d"] = stock_usd_corr
     merged["stock_usd_corr_20d"] = merged["stock_usd_corr_20d"].fillna(0.0)
 
     # Training-Serving Skew Fix: Add sector_momentum_5d
@@ -514,7 +533,16 @@ def add_technical_indicators(raw_frame: pd.DataFrame) -> pd.DataFrame:
         return local
 
     with_indicators = ordered.groupby("symbol", group_keys=False).apply(_enrich)
-    return with_indicators.reset_index(drop=True)
+    # Preserve symbol column which may be lost during groupby
+    result = with_indicators.reset_index(drop=True)
+    if "symbol" not in result.columns and "symbol" in ordered.columns:
+        # Reconstruct symbol column from group structure
+        symbol_list = []
+        for symbol, group in ordered.groupby("symbol", group_keys=False):
+            symbol_list.extend([symbol] * len(group))
+        if len(symbol_list) == len(result):
+            result.insert(0, "symbol", symbol_list)
+    return result
 
 
 def build_feature_dataset(
@@ -560,7 +588,31 @@ def build_feature_dataset(
         return local
 
     dataset = enriched.groupby("symbol", group_keys=False).apply(_build_targets).reset_index(drop=True)
+    # Preserve symbol column after groupby
+    if "symbol" not in dataset.columns and "symbol" in enriched.columns:
+        symbol_list = []
+        for symbol, group in enriched.groupby("symbol", group_keys=False):
+            processed = _build_targets(group)
+            symbol_list.extend([symbol] * len(processed))
+        if len(symbol_list) == len(dataset):
+            dataset.insert(0, "symbol", symbol_list)
+    
     dataset = dataset.groupby("symbol", group_keys=False).apply(lambda group: group.ffill()).reset_index(drop=True)
+    # Preserve symbol column after second groupby
+    if "symbol" not in dataset.columns:
+        # Reconstruct from original enriched data
+        symbol_list = []
+        for symbol, group in enriched.groupby("symbol", group_keys=False):
+            # Count rows that will remain after ffill (all rows with valid targets)
+            processed = _build_targets(group)
+            if not processed.empty:
+                symbol_list.extend([symbol] * len(processed))
+        if len(symbol_list) == len(dataset):
+            dataset.insert(0, "symbol", symbol_list)
+    
+    for feature_name in FEATURE_COLUMNS:
+        if feature_name not in dataset.columns:
+            dataset[feature_name] = 0.0
 
     required_columns = FEATURE_COLUMNS + ["target_close_5d", "target_return_5d", "target_class_5d"]
     dataset = dataset.dropna(subset=required_columns)

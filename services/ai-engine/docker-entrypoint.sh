@@ -10,4 +10,10 @@ if [ "${HISTORICAL_SEED_ON_STARTUP:-true}" = "true" ]; then
 	python /app/data_seeder.py --if-empty --years "${HISTORICAL_YEARS:-10}" --delay-seconds "${HISTORICAL_SEED_DELAY_SECONDS:-0.25}" &
 fi
 
+# Generate today's AI signals if model exists
+if [ -f /app/models/xgboost-classifier.pkl ]; then
+	echo "Generating today's AI signals..."
+	python /app/generate_today_signals.py || echo "Signal generation failed, continuing..."
+fi
+
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000

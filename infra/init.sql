@@ -17,6 +17,7 @@ CREATE TABLE users (
     phone VARCHAR(255),
     kyc_status ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     account_status ENUM('ACTIVE', 'SUSPENDED', 'CLOSED') NOT NULL DEFAULT 'ACTIVE',
+    role ENUM('USER', 'PRO', 'ADMIN') NOT NULL DEFAULT 'USER',
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     CONSTRAINT uq_users_public_uuid UNIQUE (public_uuid),
@@ -625,6 +626,7 @@ INSERT INTO users (
     phone,
     kyc_status,
     account_status,
+    role,
     created_at,
     updated_at
 ) VALUES
@@ -637,6 +639,7 @@ INSERT INTO users (
     NULL,
     'APPROVED',
     'ACTIVE',
+    'USER',
     CURRENT_TIMESTAMP(6),
     CURRENT_TIMESTAMP(6)
 ),
@@ -649,6 +652,20 @@ INSERT INTO users (
     NULL,
     'APPROVED',
     'ACTIVE',
+    'USER',
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
+),
+(
+    3,
+    '00000000-0000-0000-0000-000000000003',
+    'admin@optimizer.com',
+    '$2a$10$7Q2vM9jC6p6zWxM8h1T7R.u0V7bR1qFv3m2l8d9kP4s6Y1w3u5h7e',
+    'System Admin',
+    NULL,
+    'APPROVED',
+    'ACTIVE',
+    'ADMIN',
     CURRENT_TIMESTAMP(6),
     CURRENT_TIMESTAMP(6)
 )
@@ -656,6 +673,7 @@ ON DUPLICATE KEY UPDATE
     full_name = VALUES(full_name),
     kyc_status = 'APPROVED',
     account_status = 'ACTIVE',
+    role = VALUES(role),
     updated_at = CURRENT_TIMESTAMP(6);
 
 INSERT INTO wallets (
@@ -684,13 +702,22 @@ INSERT INTO wallets (
     0,
     CURRENT_TIMESTAMP(6),
     CURRENT_TIMESTAMP(6)
+),
+(
+    3,
+    'EGP',
+    1000000.0000,
+    0.0000,
+    0,
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
 )
 ON DUPLICATE KEY UPDATE
     currency = 'EGP',
     available_balance = 1000000.0000,
     updated_at = CURRENT_TIMESTAMP(6);
 
-DELETE FROM subscriptions WHERE user_id IN (1, 2);
+DELETE FROM subscriptions WHERE user_id IN (1, 2, 3);
 
 INSERT INTO subscriptions (
     user_id,
@@ -721,4 +748,58 @@ INSERT INTO subscriptions (
     'STATIC_SEED_PREMIUM_2',
     CURRENT_TIMESTAMP(6),
     CURRENT_TIMESTAMP(6)
+),
+(
+    3,
+    'PREMIUM',
+    'ACTIVE',
+    CURRENT_TIMESTAMP(6),
+    NULL,
+    'STATIC_SEED_PREMIUM_3',
+    CURRENT_TIMESTAMP(6),
+    CURRENT_TIMESTAMP(6)
 );
+
+-- -----------------------------------------------------------------------------
+-- RBAC Tables for Role-Based Access Control
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS roles (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(64) NOT NULL,
+    description VARCHAR(255),
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    CONSTRAINT uq_roles_name UNIQUE (name)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS permissions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(64) NOT NULL,
+    description VARCHAR(255),
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    CONSTRAINT uq_permissions_name UNIQUE (name)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    user_id BIGINT NOT NULL,
+    role_id INT NOT NULL,
+    PRIMARY KEY (user_id, role_id),
+    CONSTRAINT fk_user_roles_user_id FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT fk_user_roles_role_id FOREIGN KEY (role_id) REFERENCES roles (id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role_id INT NOT NULL,
+    permission_id INT NOT NULL,
+    PRIMARY KEY (role_id, permission_id),
+    CONSTRAINT fk_role_permissions_role_id FOREIGN KEY (role_id) REFERENCES roles (id) ON DELETE CASCADE,
+    CONSTRAINT fk_role_permissions_permission_id FOREIGN KEY (permission_id) REFERENCES permissions (id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Seed default roles
+INSERT IGNORE INTO roles (id, name, description, created_at, updated_at) VALUES
+(1, 'USER', 'Standard user with basic access', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)),
+(2, 'PRO', 'Premium user with advanced features', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)),
+(3, 'ADMIN', 'Administrator with full access', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
