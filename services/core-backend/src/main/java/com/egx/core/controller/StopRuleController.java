@@ -53,7 +53,7 @@ public class StopRuleController {
         Long userId = resolveUserId(authentication);
         premiumAccessService.assertPremium(userId);
 
-        return stopRuleRepository.findByUserIdOrderByUpdatedAtDesc(userId)
+        return stopRuleRepository.findLatestActiveByUserId(userId)
                 .stream()
                 .map(this::enrichStopRuleWithAiSignal)
                 .toList();

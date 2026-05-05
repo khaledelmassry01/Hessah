@@ -187,8 +187,16 @@ export function MarketWatchPage() {
                             <TableCell>
                               <Badge variant={actionColor}>{action}</Badge>
                             </TableCell>
-                            <TableCell>
-                              {rec.xaiReasons?.[0] || "No explainability reasons available."}
+                            <TableCell className="whitespace-normal break-words">
+                              {rec.xaiReasons && rec.xaiReasons.length ? (
+                                <ul className="list-disc pl-4 space-y-1">
+                                  {rec.xaiReasons.map((reason, reasonIdx) => (
+                                    <li key={`${rec.id || idx}-reason-${reasonIdx}`}>{reason}</li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <span>No explainability reasons available.</span>
+                              )}
                             </TableCell>
                             <TableCell>
                               {typeof rec.stopLossPct === "number"

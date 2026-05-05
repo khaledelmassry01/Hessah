@@ -342,7 +342,11 @@ public class PortfolioService {
             target.setStockId(stock.getId());
             target.setTargetWeight(normalizedWeight);
             target.setTargetAmountEgp(targetAmount);
-            // Note: sectorCode is now accessed via StockInstrument relationship (5NF compliance)
+            String sectorCode = stock.getSectorCode();
+            if (sectorCode == null || sectorCode.isBlank()) {
+                sectorCode = DEFAULT_SECTOR_CODE;
+            }
+            target.setSectorCode(sectorCode);
             target.setConstraintFlagsJson(
                     "{\"risk_level\":\"" + riskLevel.name() + "\",\"max_sector_weight\":0.30,\"max_adv30_participation\":0.05,\"exclude_suspended\":true}"
             );

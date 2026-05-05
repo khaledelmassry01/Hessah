@@ -60,6 +60,7 @@ CONFIDENCE_THRESHOLDS = {
     "HIGH": 0.50,     # Was 0.70
 }
 TOP_RECOMMENDATION_COUNT = 3
+FALLBACK_ALLOCATION_COUNT = int(os.getenv("AI_FALLBACK_ALLOCATION_COUNT", "8"))
 ALT_NEWS_INFLUENCE_THRESHOLD = 0.08
 ALT_COMMODITY_INFLUENCE_THRESHOLD = 0.10
 UREA_SYMBOL_ROOTS = {"ABUK", "MFPC"}
@@ -581,9 +582,46 @@ def predict(payload: PredictRequest) -> PredictResponse:
         cash_weight = 1.0
 
         if not high_confidence_symbols:
-            warnings.append(
-                "All eligible symbols fell below dynamic confidence thresholds; allocation shifted to CASH"
+            fallback_count = max(3, min(FALLBACK_ALLOCATION_COUNT, len(eligible_symbols)))
+            ranked_fallback = sorted(
+                zip(eligible_symbols, expected_returns_ml.tolist()),
+                key=lambda item: float(item[1]),
+                reverse=True,
             )
+            fallback_symbols = [symbol for symbol, _ in ranked_fallback[:fallback_count]]
+
+            if fallback_symbols:
+                warnings.append(
+                    "All eligible symbols fell below dynamic confidence thresholds; fallback allocation used"
+                )
+                selected_indices = [eligible_symbols.index(symbol) for symbol in fallback_symbols]
+                selected_returns_raw = expected_returns_ml[selected_indices]
+                selected_covariance = covariance[np.ix_(selected_indices, selected_indices)]
+                selected_bounds = [bounds[idx] for idx in selected_indices]
+                selected_sectors = {symbol: sectors[symbol] for symbol in fallback_symbols}
+                selected_sector_to_indices = _build_sector_index_map(fallback_symbols, selected_sectors)
+
+                optimization = optimize_max_sharpe(
+                    symbols=fallback_symbols,
+                    expected_returns=selected_returns_raw,
+                    covariance=selected_covariance,
+                    bounds=selected_bounds,
+                    sector_to_indices=selected_sector_to_indices,
+                    max_sector_weight=enforced_sector_cap,
+                    risk_free_rate=0.25,
+                )
+                warnings.extend(optimization.warnings)
+                optimization_used_fallback = True
+
+                final_weights, cash_weight = _apply_sector_cap_and_cash(
+                    raw_weights=optimization.weights,
+                    sectors=selected_sectors,
+                    max_sector_weight=enforced_sector_cap,
+                )
+            else:
+                warnings.append(
+                    "All eligible symbols fell below dynamic confidence thresholds; allocation shifted to CASH"
+                )
         else:
             selected_indices = [eligible_symbols.index(symbol) for symbol in high_confidence_symbols]
             selected_returns_raw = expected_returns_ml[selected_indices]

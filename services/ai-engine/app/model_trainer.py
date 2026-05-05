@@ -25,6 +25,7 @@ from .feature_engineering import (
     FEATURE_COLUMNS,
     build_feature_dataset,
     build_latest_feature_rows,
+    load_historical_market_data,
     MysqlSettings,
     open_mysql_connection,
     resolve_mysql_settings,
@@ -52,6 +53,10 @@ _MODEL_CACHE: dict[str, Any] = {
     "manifest": {},
     "models": {},
 }
+
+
+def _require_gpu() -> bool:
+    return os.getenv("AI_REQUIRE_GPU", "false").strip().lower() in {"1", "true", "yes"}
 
 
 @dataclass(frozen=True)
@@ -145,6 +150,9 @@ def _get_optimized_xgboost_params(
         try:
             search.fit(x_train.to_numpy(), y_train.to_numpy(), sample_weight=sample_weight)
         except xgb.core.XGBoostError:
+            if _require_gpu():
+                LOGGER.error("GPU is required but not available; aborting HPO.")
+                raise
             LOGGER.warning("GPU not detected, falling back to CPU.")
             search = RandomizedSearchCV(
                 estimator=_build_base_model("cpu"),
@@ -298,6 +306,9 @@ def _fit_xgb_with_gpu_fallback(
         model.fit(x_train, y_train, sample_weight=sample_weight)
         return model
     except xgb.core.XGBoostError:
+        if _require_gpu():
+            LOGGER.error("GPU is required but not available; aborting training.")
+            raise
         LOGGER.warning("GPU not detected, falling back to CPU.")
         model = cpu_factory()
         model.fit(x_train, y_train, sample_weight=sample_weight)

@@ -17,6 +17,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.egx.core.domain.User;
 import com.egx.core.domain.enums.AccountStatus;
+import com.egx.core.domain.enums.SubscriptionTier;
 import com.egx.core.repository.TokenBlacklistRepository;
 import com.egx.core.repository.UserRepository;
 import com.egx.core.repository.UserSessionRepository;
@@ -116,6 +117,16 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                         .map(r -> new SimpleGrantedAuthority("ROLE_" + r.trim()))
                         .collect(Collectors.toList());
             }
+
+            try {
+                SubscriptionTier tier = jwtService.extractTier(token);
+                if (tier == SubscriptionTier.PREMIUM) {
+                    authorities.add(new SimpleGrantedAuthority("ROLE_PREMIUM"));
+                }
+            } catch (IllegalArgumentException ignored) {
+                // Ignore missing tier claim to keep compatibility with legacy tokens.
+            }
+
             if (authorities.isEmpty()) {
                 authorities.add(new SimpleGrantedAuthority("ROLE_USER"));
             }

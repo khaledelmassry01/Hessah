@@ -1,11 +1,5 @@
 package com.egx.core.service;
 
-import com.egx.core.domain.ModelPerformanceLog;
-import com.egx.core.repository.ModelPerformanceLogRepository;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
@@ -13,6 +7,13 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import org.springframework.data.domain.PageRequest;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.egx.core.domain.ModelPerformanceLog;
+import com.egx.core.repository.ModelPerformanceLogRepository;
 
 @Service
 public class ModelPerformanceService {
@@ -134,11 +135,15 @@ public class ModelPerformanceService {
     }
 
     @Transactional(readOnly = true)
-    public List<PerformanceSummaryEntry> fetchPerformanceSummary(Integer requestedLimit) {
+    public List<PerformanceSummaryEntry> fetchPerformanceSummary(Long userId, Integer requestedLimit) {
         int limit = sanitizeSummaryLimit(requestedLimit);
 
+        if (userId == null) {
+            return List.of();
+        }
+
         return modelPerformanceLogRepository
-                .findByOrderByCreatedAtDesc(PageRequest.of(0, limit))
+                .findByUserIdOrderByCreatedAtDesc(userId, PageRequest.of(0, limit))
                 .stream()
                 .map(this::toSummaryEntry)
                 .toList();

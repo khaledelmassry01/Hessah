@@ -29,6 +29,9 @@ public class PortfolioTarget {
     @Column(name = "target_amount_egp", nullable = false, precision = 19, scale = 4)
     private BigDecimal targetAmountEgp;
 
+    @Column(name = "sector_code", nullable = false, length = 64)
+    private String sectorCode;
+
     @Column(name = "constraint_flags_json", columnDefinition = "json")
     private String constraintFlagsJson;
 
@@ -72,13 +75,12 @@ public class PortfolioTarget {
         this.targetAmountEgp = targetAmountEgp;
     }
 
-    /**
-     * Get sector code from associated stock instrument (5NF compliance).
-     * This is a derived field, not stored in the table.
-     */
     public String getSectorCode() {
-        // This method can be populated via service layer using stock relationship
-        return null; // To be populated via StockInstrument lookup in service
+        return sectorCode;
+    }
+
+    public void setSectorCode(String sectorCode) {
+        this.sectorCode = sectorCode;
     }
 
     public String getConstraintFlagsJson() {

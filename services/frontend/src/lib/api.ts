@@ -42,7 +42,7 @@ axios.defaults.withCredentials = true;
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000,
+  timeout: 180000,
   withCredentials: true,
   headers: {
     "Content-Type": "application/json",
@@ -743,7 +743,9 @@ export async function fetchLatestPortfolio(userId: number): Promise<PortfolioRes
 export async function generatePortfolio(
   payload: GeneratePortfolioPayload,
 ): Promise<PortfolioResult> {
-  const { data } = await apiClient.post(ApiContracts.portfolioGenerate, payload);
+  const { data } = await apiClient.post(ApiContracts.portfolioGenerate, payload, {
+    timeout: 180000,
+  });
 
   return normalizePortfolioResult(data);
 }
@@ -757,7 +759,9 @@ export async function executePortfolioRebalance(
 }
 
 export async function runBacktest(payload: BacktestPayload): Promise<BacktestResult> {
-  const { data } = await apiClient.post("/premium/backtest", payload);
+  const { data } = await apiClient.post("/premium/backtest", payload, {
+    timeout: 180000,
+  });
   return normalizeBacktestResult(data);
 }
 

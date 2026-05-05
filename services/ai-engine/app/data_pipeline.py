@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .feature_engineering import load_historical_market_data
+
 LOGGER = logging.getLogger(__name__)
 TRADING_DAYS_PER_YEAR = 252
 DEFAULT_BARS = 252
@@ -232,17 +234,40 @@ def load_market_dataset(
         raise ValueError("max_adv30_participation must be > 0")
 
     warnings: list[str] = []
+    source = os.getenv("MARKET_DATA_SOURCE", "tradingview").strip().lower()
 
-    source = "tradingview"
-    try:
-        history_by_symbol = _load_history_from_tradingview(
-            as_of_date=as_of_date,
-            n_bars=n_bars,
-            warnings=warnings,
-        )
-        LOGGER.info("Using TradingView as primary data source")
-    except DataPipelineError as exc:
-        raise DataPipelineError(f"TradingView load failed: {exc}") from exc
+    if source == "db":
+        try:
+            history_by_symbol = _load_history_from_db(
+                as_of_date=as_of_date,
+                n_bars=n_bars,
+                warnings=warnings,
+            )
+            LOGGER.info("Using MySQL market data as primary data source")
+        except DataPipelineError as exc:
+            warnings.append(f"Database load failed: {exc}")
+            history_by_symbol = _load_history_from_tradingview(
+                as_of_date=as_of_date,
+                n_bars=n_bars,
+                warnings=warnings,
+            )
+            LOGGER.info("Using TradingView as fallback data source")
+    else:
+        try:
+            history_by_symbol = _load_history_from_tradingview(
+                as_of_date=as_of_date,
+                n_bars=n_bars,
+                warnings=warnings,
+            )
+            LOGGER.info("Using TradingView as primary data source")
+        except DataPipelineError as exc:
+            warnings.append(f"TradingView load failed: {exc}")
+            history_by_symbol = _load_history_from_db(
+                as_of_date=as_of_date,
+                n_bars=n_bars,
+                warnings=warnings,
+            )
+            LOGGER.info("Using MySQL market data as fallback data source")
 
     prices, volumes = _build_price_volume_frames(history_by_symbol)
     returns = prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
@@ -443,6 +468,62 @@ def _load_history_from_tradingview(
         len(history_by_symbol),
     )
 
+    return history_by_symbol
+
+
+def _load_history_from_db(
+    as_of_date: date,
+    n_bars: int,
+    warnings: list[str],
+) -> dict[str, pd.DataFrame]:
+    start_days = max(int(n_bars * 2), 366)
+    start_date = as_of_date - timedelta(days=start_days)
+
+    frame = load_historical_market_data(
+        symbols=EGX30_CANONICAL_SYMBOLS,
+        start_date=start_date,
+        end_date=as_of_date,
+    )
+    if frame.empty:
+        raise DataPipelineError("Database returned no market data")
+
+    frame = frame.copy()
+    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+
+    history_by_symbol: dict[str, pd.DataFrame] = {}
+    missing_symbols: list[str] = []
+
+    for symbol in EGX30_CANONICAL_SYMBOLS:
+        symbol_frame = frame.loc[frame["symbol"] == symbol]
+        if symbol_frame.empty:
+            missing_symbols.append(symbol)
+            continue
+
+        symbol_frame = symbol_frame.dropna(subset=["trade_date", "close_price"]).sort_values("trade_date")
+        if symbol_frame.empty:
+            missing_symbols.append(symbol)
+            continue
+
+        clipped = symbol_frame.tail(n_bars).set_index("trade_date")
+        clipped = clipped.rename(
+            columns={
+                "open_price": "open",
+                "high_price": "high",
+                "low_price": "low",
+                "close_price": "close",
+                "volume": "volume",
+            }
+        )
+        history_by_symbol[symbol] = clipped[["open", "high", "low", "close", "volume"]]
+
+    if missing_symbols:
+        warnings.append("Database missing data for symbols: " + ", ".join(missing_symbols))
+
+    if not history_by_symbol:
+        raise DataPipelineError("Database returned no usable OHLCV history")
+
+    LOGGER.info("Loaded database history: symbols=%s", len(history_by_symbol))
     return history_by_symbol
 
 

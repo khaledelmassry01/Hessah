@@ -35,7 +35,7 @@ public class PremiumAccessService {
                 .isPresent();
 
         if (!isPremium) {
-            throw new TierAccessDeniedException("PRO subscription or role is required for this feature");
+            throw new TierAccessDeniedException("PREMIUM subscription or role is required for this feature");
         }
     }
 

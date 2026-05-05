@@ -114,13 +114,13 @@ public class SecurityConfig {
                     // User profile and session endpoints must always be authenticated.
                     auth.requestMatchers("/users/**", "/api/core/users/**").authenticated();
 
-                    // Premium-only API surface (PRO and ADMIN roles).
+                        // Premium-only API surface (PREMIUM, PRO, and ADMIN roles).
                     auth.requestMatchers(
                             "/premium/**",
                             "/api/core/premium/**",
                             "/ai/performance-summary",
                             "/api/core/ai/performance-summary"
-                    ).hasAnyRole("PRO", "ADMIN");
+                        ).hasAnyRole("PREMIUM", "PRO", "ADMIN");
 
                     // Admin-only API surface.
                     auth.requestMatchers("/admin/**", "/api/core/admin/**").hasRole("ADMIN");

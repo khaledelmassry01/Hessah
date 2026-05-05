@@ -45,7 +45,7 @@ import jakarta.validation.constraints.NotNull;
 
 @RestController
 @RequestMapping({"/premium", "/api/core/premium"})
-@PreAuthorize("hasAnyRole('PRO', 'ADMIN')")
+@PreAuthorize("hasAnyRole('PREMIUM', 'PRO', 'ADMIN')")
 @Validated
 public class PremiumController {
 

@@ -228,8 +228,7 @@ class PredictionService:
 
         scored_reasons.sort(key=lambda item: item[0], reverse=True)
         selected: list[dict[str, Any]] = []
-        # keep predictions separate from module `warnings`
-        model_pairs: dict[str, dict[str, Any]] = {}
+        seen: set[str] = set()
         for weight, reason_text in scored_reasons:
             if reason_text in seen:
                 continue
@@ -393,7 +392,7 @@ class PredictionService:
             except Exception as exc:  # noqa: BLE001
                 warnings_list.append(f"Prediction failed for {symbol}: {exc}")
 
-        return predictions, warnings
+        return predictions, warnings_list
 
     def generate_daily_signals(
         self,

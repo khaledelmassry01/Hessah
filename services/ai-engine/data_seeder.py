@@ -240,16 +240,6 @@ def _looks_like_unknown_symbol_error(raw_text: str) -> bool:
 
 
 def run_seeding(years: int, output_dir: Path, delay_seconds: float, if_empty: bool) -> int:
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if if_empty and any(output_dir.glob("*.csv")):
-        LOGGER.info("Historical directory already contains CSV files. Skipping seeding: %s", output_dir)
-        return 0
-
-    if years < 1:
-        raise ValueError("years must be >= 1")
-
-    # New behavior: use the historical ingestion pipeline to fetch and POST data directly to core backend.
     try:
         from app.historical_ingestion import ingest_historical_market_data_to_core
 

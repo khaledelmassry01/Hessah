@@ -1,9 +1,14 @@
 server:
   port: 8081
+  tomcat:
+    connection-timeout: 180s
 
 spring:
   application:
     name: core-backend
+  mvc:
+    async:
+      request-timeout: 180s
   flyway:
     enabled: false
   datasource:

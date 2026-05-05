@@ -1,11 +1,16 @@
 server:
   port: 8080
+  tomcat:
+    connection-timeout: 180000
 
 spring:
   application:
     name: api-gateway
   cloud:
     gateway:
+      httpclient:
+        response-timeout: 180s
+        connect-timeout: 180000
       globalcors:
         add-to-simple-url-handler-mapping: true
         cors-configurations:
